@@ -1,3 +1,9 @@
+postgresql-9.2 (9.2.4-1.pgdg12.4+0) precise; urgency=low
+
+  * Rebuild for PPA (version downgraded to not shadow apt.postgresql.org)
+
+ -- Max Arnold <arnold.maxim@gmail.com>  Wed, 10 Jul 2013 20:32:23 +0700
+
 postgresql-9.2 (9.2.4-1.pgdg12.4+1) precise-pgdg; urgency=low
 
   * Rebuild for precise-pgdg (jenkins-postgresql-9.2-source-
