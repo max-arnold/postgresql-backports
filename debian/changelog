@@ -1,3 +1,9 @@
+postgresql-9.2 (9.2.4-1.pgdg12.4+1~0) precise-pgdg; urgency=low
+
+  * Add pgdg suffix
+
+ -- Max Arnold <arnold.maxim@gmail.com>  Sat, 13 Jul 2013 22:50:35 +0700
+
 postgresql-9.2 (9.2.4-1.pgdg12.4+0) precise; urgency=low
 
   * Rebuild for PPA (version downgraded to not shadow apt.postgresql.org)
