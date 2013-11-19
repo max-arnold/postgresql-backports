@@ -1,9 +1,8 @@
 postgresql-9.3 (9.3.1-1.pgdg12.4+0) precise-pgdg; urgency=low
 
-  * Rebuild for precise-pgdg (jenkins-postgresql-9.3-source-
-    distribution=precise-190, bzr revision 431)
+    * Backport to Ubuntu Precise
 
- -- apt.postgresql.org autobuilder <myon@debian.org>  Tue, 08 Oct 2013 12:48:14 +0200
+ -- Max Arnold <arnold.maxim@gmail.com>  Wed, 20 Nov 2013 00:23:12 +0700
 
 postgresql-9.3 (9.3.1-1) unstable; urgency=low
 
