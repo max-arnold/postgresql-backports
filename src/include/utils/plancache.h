@@ -5,7 +5,7 @@
  *
  * See plancache.c for comments.
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/utils/plancache.h
@@ -61,11 +61,11 @@
  * allows the query tree to be discarded easily when it is invalidated.
  *
  * Some callers wish to use the CachedPlan API even with one-shot queries
- * that have no reason to be saved at all.  We therefore support a "oneshot"
- * variant that does no data copying or invalidation checking.  In this case
+ * that have no reason to be saved at all.	We therefore support a "oneshot"
+ * variant that does no data copying or invalidation checking.	In this case
  * there are no separate memory contexts: the CachedPlanSource struct and
  * all subsidiary data live in the caller's CurrentMemoryContext, and there
- * is no way to free memory short of clearing that entire context.  A oneshot
+ * is no way to free memory short of clearing that entire context.	A oneshot
  * plan is always treated as unsaved.
  *
  * Note: the string referenced by commandTag is not subsidiary storage;
@@ -86,20 +86,21 @@ typedef struct CachedPlanSource
 	int			cursor_options; /* cursor options used for planning */
 	bool		fixed_result;	/* disallow change in result tupdesc? */
 	TupleDesc	resultDesc;		/* result type; NULL = doesn't return tuples */
-	struct OverrideSearchPath *search_path;		/* saved search_path */
 	MemoryContext context;		/* memory context holding all above */
 	/* These fields describe the current analyzed-and-rewritten query tree: */
 	List	   *query_list;		/* list of Query nodes, or NIL if not valid */
 	List	   *relationOids;	/* OIDs of relations the queries depend on */
 	List	   *invalItems;		/* other dependencies, as PlanInvalItems */
+	struct OverrideSearchPath *search_path;		/* search_path used for
+												 * parsing and planning */
 	MemoryContext query_context;	/* context holding the above, or NULL */
 	/* If we have a generic plan, this is a reference-counted link to it: */
 	struct CachedPlan *gplan;	/* generic plan, or NULL if not valid */
 	/* Some state flags: */
+	bool		is_oneshot;		/* is it a "oneshot" plan? */
 	bool		is_complete;	/* has CompleteCachedPlan been done? */
 	bool		is_saved;		/* has CachedPlanSource been "saved"? */
 	bool		is_valid;		/* is the query_list currently valid? */
-	bool		is_oneshot;		/* is it a "oneshot" plan? */
 	int			generation;		/* increments each time we create a plan */
 	/* If CachedPlanSource has been saved, it is a member of a global list */
 	struct CachedPlanSource *next_saved;		/* list link, if so */
@@ -124,9 +125,9 @@ typedef struct CachedPlan
 	int			magic;			/* should equal CACHEDPLAN_MAGIC */
 	List	   *stmt_list;		/* list of statement nodes (PlannedStmts and
 								 * bare utility statements) */
+	bool		is_oneshot;		/* is it a "oneshot" plan? */
 	bool		is_saved;		/* is CachedPlan in a long-lived context? */
 	bool		is_valid;		/* is the stmt_list currently valid? */
-	bool		is_oneshot;		/* is it a "oneshot" plan? */
 	TransactionId saved_xmin;	/* if valid, replan when TransactionXmin
 								 * changes from this value */
 	int			generation;		/* parent's generation number for this plan */
@@ -142,8 +143,8 @@ extern CachedPlanSource *CreateCachedPlan(Node *raw_parse_tree,
 				 const char *query_string,
 				 const char *commandTag);
 extern CachedPlanSource *CreateOneShotCachedPlan(Node *raw_parse_tree,
-				 const char *query_string,
-				 const char *commandTag);
+						const char *query_string,
+						const char *commandTag);
 extern void CompleteCachedPlan(CachedPlanSource *plansource,
 				   List *querytree_list,
 				   MemoryContext querytree_context,

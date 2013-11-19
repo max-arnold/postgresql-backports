@@ -2,7 +2,7 @@
  *
  * pg_ctl --- start/stops/restarts the PostgreSQL server
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  *
  * src/bin/pg_ctl/pg_ctl.c
  *
@@ -33,7 +33,6 @@
 #include <sys/resource.h>
 #endif
 
-#include "libpq/pqsignal.h"
 #include "getopt_long.h"
 #include "miscadmin.h"
 
@@ -118,8 +117,6 @@ write_stderr(const char *fmt,...)
 /* This extension allows gcc to check the format string for consistency with
    the supplied arguments. */
 __attribute__((format(PG_PRINTF_ATTRIBUTE, 1, 2)));
-static void *pg_malloc(size_t size);
-static char *xstrdup(const char *s);
 static void do_advice(void);
 static void do_help(void);
 static void set_mode(char *modeopt);
@@ -226,42 +223,6 @@ write_stderr(const char *fmt,...)
 }
 
 /*
- * routines to check memory allocations and fail noisily.
- */
-
-static void *
-pg_malloc(size_t size)
-{
-	void	   *result;
-
-	/* Avoid unportable behavior of malloc(0) */
-	if (size == 0)
-		size = 1;
-	result = malloc(size);
-	if (!result)
-	{
-		write_stderr(_("%s: out of memory\n"), progname);
-		exit(1);
-	}
-	return result;
-}
-
-
-static char *
-xstrdup(const char *s)
-{
-	char	   *result;
-
-	result = strdup(s);
-	if (!result)
-	{
-		write_stderr(_("%s: out of memory\n"), progname);
-		exit(1);
-	}
-	return result;
-}
-
-/*
  * Given an already-localized string, print it to stdout unless the
  * user has specified that no messages should be printed.
  */
@@ -296,8 +257,13 @@ get_pgpid(void)
 	}
 	if (fscanf(pidf, "%ld", &pid) != 1)
 	{
-		write_stderr(_("%s: invalid data in PID file \"%s\"\n"),
-					 progname, pid_file);
+		/* Is the file empty? */
+		if (ftell(pidf) == 0 && feof(pidf))
+			write_stderr(_("%s: the PID file \"%s\" is empty\n"),
+						 progname, pid_file);
+		else
+			write_stderr(_("%s: invalid data in PID file \"%s\"\n"),
+						 progname, pid_file);
 		exit(1);
 	}
 	fclose(pidf);
@@ -319,7 +285,7 @@ readfile(const char *path)
 	int			i;
 	int			n;
 	int			len;
-	struct stat	statbuf;
+	struct stat statbuf;
 
 	/*
 	 * Slurp the file into memory.
@@ -378,8 +344,9 @@ readfile(const char *path)
 	{
 		if (buffer[i] == '\n')
 		{
-			int		slen = &buffer[i] - linebegin + 1;
-			char   *linebuf = pg_malloc(slen + 1);
+			int			slen = &buffer[i] - linebegin + 1;
+			char	   *linebuf = pg_malloc(slen + 1);
+
 			memcpy(linebuf, linebegin, slen);
 			linebuf[slen] = '\0';
 			result[n++] = linebuf;
@@ -559,7 +526,7 @@ test_postmaster_connection(bool do_checkpoint)
 						hostaddr = optlines[LOCK_FILE_LINE_LISTEN_ADDR - 1];
 
 						/*
-						 * While unix_socket_directory can accept relative
+						 * While unix_socket_directories can accept relative
 						 * directories, libpq's host parameter must have a
 						 * leading slash to indicate a socket directory.  So,
 						 * ignore sockdir if it's relative, and try to use TCP
@@ -1130,6 +1097,13 @@ do_promote(void)
 					 progname);
 		exit(1);
 	}
+
+	/*
+	 * For 9.3 onwards, "fast" promotion is performed. Promotion
+	 * with a full checkpoint is still possible by writing a file called
+	 * "fallback_promote" instead of "promote"
+	 */
+	snprintf(promote_file, MAXPGPATH, "%s/promote", pg_data);
 
 	if ((prmfile = fopen(promote_file, "w")) == NULL)
 	{
@@ -1823,7 +1797,7 @@ do_help(void)
 	printf(_("  -o OPTIONS             command line options to pass to postgres\n"
 	 "                         (PostgreSQL server executable) or initdb\n"));
 	printf(_("  -p PATH-TO-POSTGRES    normally not necessary\n"));
-	printf(_("\nOptions for stop or restart:\n"));
+	printf(_("\nOptions for stop, restart, or promote:\n"));
 	printf(_("  -m, --mode=MODE        MODE can be \"smart\", \"fast\", or \"immediate\"\n"));
 
 	printf(_("\nShutdown modes are:\n"));
@@ -1964,7 +1938,7 @@ adjust_data_dir(void)
 	if (exec_path == NULL)
 		my_exec_path = find_other_exec_or_die(argv0, "postgres", PG_BACKEND_VERSIONSTR);
 	else
-		my_exec_path = xstrdup(exec_path);
+		my_exec_path = pg_strdup(exec_path);
 
 	snprintf(cmd, MAXPGPATH, SYSTEMQUOTE "\"%s\" %s%s -C data_directory" SYSTEMQUOTE,
 			 my_exec_path, pgdata_opt ? pgdata_opt : "", post_opts ?
@@ -1984,7 +1958,7 @@ adjust_data_dir(void)
 		*strchr(filename, '\n') = '\0';
 
 	free(pg_data);
-	pg_data = xstrdup(filename);
+	pg_data = pg_strdup(filename);
 	canonicalize_path(pg_data);
 }
 
@@ -2075,7 +2049,7 @@ main(int argc, char **argv)
 						char	   *pgdata_D;
 						char	   *env_var = pg_malloc(strlen(optarg) + 8);
 
-						pgdata_D = xstrdup(optarg);
+						pgdata_D = pg_strdup(optarg);
 						canonicalize_path(pgdata_D);
 						snprintf(env_var, strlen(optarg) + 8, "PGDATA=%s",
 								 pgdata_D);
@@ -2093,22 +2067,22 @@ main(int argc, char **argv)
 						break;
 					}
 				case 'l':
-					log_file = xstrdup(optarg);
+					log_file = pg_strdup(optarg);
 					break;
 				case 'm':
 					set_mode(optarg);
 					break;
 				case 'N':
-					register_servicename = xstrdup(optarg);
+					register_servicename = pg_strdup(optarg);
 					break;
 				case 'o':
-					post_opts = xstrdup(optarg);
+					post_opts = pg_strdup(optarg);
 					break;
 				case 'p':
-					exec_path = xstrdup(optarg);
+					exec_path = pg_strdup(optarg);
 					break;
 				case 'P':
-					register_password = xstrdup(optarg);
+					register_password = pg_strdup(optarg);
 					break;
 				case 's':
 					silent_mode = true;
@@ -2127,16 +2101,11 @@ main(int argc, char **argv)
 					break;
 				case 'U':
 					if (strchr(optarg, '\\'))
-						register_username = xstrdup(optarg);
+						register_username = pg_strdup(optarg);
 					else
 						/* Prepend .\ for local accounts */
 					{
-						register_username = malloc(strlen(optarg) + 3);
-						if (!register_username)
-						{
-							write_stderr(_("%s: out of memory\n"), progname);
-							exit(1);
-						}
+						register_username = pg_malloc(strlen(optarg) + 3);
 						strcpy(register_username, ".\\");
 						strcat(register_username, optarg);
 					}
@@ -2225,9 +2194,9 @@ main(int argc, char **argv)
 	pg_config = getenv("PGDATA");
 	if (pg_config)
 	{
-		pg_config = xstrdup(pg_config);
+		pg_config = pg_strdup(pg_config);
 		canonicalize_path(pg_config);
-		pg_data = xstrdup(pg_config);
+		pg_data = pg_strdup(pg_config);
 	}
 
 	/* -D might point at config-only directory; if so find the real PGDATA */
@@ -2271,7 +2240,6 @@ main(int argc, char **argv)
 		snprintf(pid_file, MAXPGPATH, "%s/postmaster.pid", pg_data);
 		snprintf(backup_file, MAXPGPATH, "%s/backup_label", pg_data);
 		snprintf(recovery_file, MAXPGPATH, "%s/recovery.conf", pg_data);
-		snprintf(promote_file, MAXPGPATH, "%s/promote", pg_data);
 	}
 
 	switch (ctl_command)

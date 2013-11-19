@@ -6,15 +6,18 @@
 # runs the regression tests (to put in some data), runs pg_dumpall,
 # runs pg_upgrade, runs pg_dumpall again, compares the dumps.
 #
-# Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+# Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
 # Portions Copyright (c) 1994, Regents of the University of California
 
 set -e
 
 : ${MAKE=make}
-: ${PGPORT=50432}
-export PGPORT
 
+# Guard against parallel make issues (see comments in pg_regress.c)
+unset MAKEFLAGS
+unset MAKELEVEL
+
+# Set listen_addresses desirably
 testhost=`uname -s`
 
 case $testhost in
@@ -67,6 +70,12 @@ PGDATA="$BASE_PGDATA.old"
 export PGDATA
 rm -rf "$BASE_PGDATA" "$PGDATA"
 
+logdir=$PWD/log
+rm -rf "$logdir"
+mkdir "$logdir"
+
+# Clear out any environment vars that might cause libpq to connect to
+# the wrong postmaster (cf pg_regress.c)
 unset PGDATABASE
 unset PGUSER
 unset PGSERVICE
@@ -76,14 +85,32 @@ unset PGCONNECT_TIMEOUT
 unset PGHOST
 unset PGHOSTADDR
 
-logdir=$PWD/log
-rm -rf "$logdir"
-mkdir "$logdir"
+# Select a non-conflicting port number, similarly to pg_regress.c
+PG_VERSION_NUM=`grep '#define PG_VERSION_NUM' $newsrc/src/include/pg_config.h | awk '{print $3}'`
+PGPORT=`expr $PG_VERSION_NUM % 16384 + 49152`
+export PGPORT
+
+i=0
+while psql -X postgres </dev/null 2>/dev/null
+do
+	i=`expr $i + 1`
+	if [ $i -eq 16 ]
+	then
+		echo port $PGPORT apparently in use
+		exit 1
+	fi
+	PGPORT=`expr $PGPORT + 1`
+	export PGPORT
+done
+
+# buildfarm may try to override port via EXTRA_REGRESS_OPTS ...
+EXTRA_REGRESS_OPTS="$EXTRA_REGRESS_OPTS --port=$PGPORT"
+export EXTRA_REGRESS_OPTS
 
 # enable echo so the user can see what is being executed
 set -x
 
-$oldbindir/initdb
+$oldbindir/initdb -N
 $oldbindir/pg_ctl start -l "$logdir/postmaster1.log" -o "$POSTMASTER_OPTS" -w
 if "$MAKE" -C "$oldsrc" installcheck; then
 	pg_dumpall -f "$temp_root"/dump1.sql || pg_dumpall1_status=$?
@@ -123,9 +150,9 @@ fi
 
 PGDATA=$BASE_PGDATA
 
-initdb
+initdb -N
 
-pg_upgrade -d "${PGDATA}.old" -D "${PGDATA}" -b "$oldbindir" -B "$bindir"
+pg_upgrade $PG_UPGRADE_OPTS -d "${PGDATA}.old" -D "${PGDATA}" -b "$oldbindir" -B "$bindir" -p "$PGPORT" -P "$PGPORT"
 
 pg_ctl start -l "$logdir/postmaster2.log" -o "$POSTMASTER_OPTS" -w
 
