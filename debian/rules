@@ -1,10 +1,19 @@
 #!/usr/bin/make -f
 TCL_VER := 8.5
-MAJOR_VER := 9.2
+MAJOR_VER := 9.3
+
+DEB_BUILD_ARCH = $(shell dpkg-architecture -qDEB_BUILD_ARCH)
 
 # this must also work for old releases with multiarch, so don't fail if the
 # variable doesn't exist
 DEB_HOST_MULTIARCH ?= $(shell dpkg-architecture -qDEB_HOST_MULTIARCH || true)
+
+# support multi-arch location
+ifneq ($(wildcard /usr/lib/$(DEB_HOST_MULTIARCH)/tcl$(TCL_VER)),)
+TCL_CONFIG_DIR := /usr/lib/$(DEB_HOST_MULTIARCH)
+else
+TCL_CONFIG_DIR := /usr/lib
+endif
 
 # support both hardening-wrapper (for backports) and dpkg-buildflags
 export DEB_BUILD_HARDENING = 1
@@ -20,11 +29,11 @@ ifeq ($(shell uname -s),Linux)
 CFLAGS+= -DLINUX_OOM_ADJ=0
 endif
 
-ifneq ($(findstring $(DEB_BUILD_ARCH), sparc alpha),)
-# sparc and alpha's gcc currently miscompiles; see
+# sparc and alpha's gcc used to miscompile; see
 # http://lists.debian.org/debian-alpha/2007/11/msg00025.html
-    CFLAGS+=-O1
-endif
+#ifneq ($(findstring $(DEB_BUILD_ARCH), sparc alpha),)
+#    CFLAGS+=-O1
+#endif
 
 export DPKG_GENSYMBOLS_CHECK_LEVEL=4
 
@@ -50,12 +59,23 @@ COMMON_CONFIGURE_FLAGS= \
   CFLAGS='$(CFLAGS)' \
   LDFLAGS='$(LDFLAGS)'
 
+# allow missing krb5 and ldap during bootstrapping
+ifeq ($(DEB_STAGE),stage1)
+BOOTSTRAP_FLAGS=
+else
+BOOTSTRAP_FLAGS= --with-krb5 --with-gssapi --with-ldap
+endif
+
 # build should fail on test suite failures on all arches
 TESTSUITE_FAIL_CMD=exit 1
-
+# hurd doesn't implement semaphores; succeed anyway so they at least have libpq5
+# plperl currently fails on kfreebsd-*
+ifneq ($(filter $(DEB_BUILD_ARCH), hurd-i386 kfreebsd-amd64 kfreebsd-i386),)
+TESTSUITE_FAIL_CMD=exit 0
+endif
 
 %:
-	dh $@
+	dh $@ --parallel
 
 override_dh_auto_configure: stamp/configure-build stamp/configure-build-py3
 
@@ -66,17 +86,15 @@ stamp/configure-build:
            --with-perl \
            --with-python \
            --with-pam \
-           --with-krb5 \
-           --with-gssapi \
            --with-openssl \
            --with-libxml \
            --with-libxslt \
-           --with-ldap \
-           --with-tclconfig=/usr/lib/tcl$(TCL_VER) \
-           --with-tkconfig=/usr/lib/tk$(TCL_VER) \
+           --with-tclconfig=$(TCL_CONFIG_DIR)/tcl$(TCL_VER) \
+           --with-tkconfig=$(TCL_CONFIG_DIR)/tk$(TCL_VER) \
            --with-includes=/usr/include/tcl$(TCL_VER) \
            PYTHON=/usr/bin/python \
-           $(COMMON_CONFIGURE_FLAGS)
+           $(COMMON_CONFIGURE_FLAGS) \
+           $(BOOTSTRAP_FLAGS)
 	touch "$@"
 	
 stamp/configure-build-py3:
@@ -135,14 +153,10 @@ override_dh_install:
 
 override_dh_auto_test:
 ifeq (, $(findstring nocheck, $(DEB_BUILD_OPTIONS)))
-	set -e; \
-	make -C build/src/test/regress bigcheck EXTRA_REGRESS_OPTS='--host=/tmp' || fail=1; \
-	if [ -n "$$fail" ]; then \
-	    for l in regression.diffs log/initdb.log log/postmaster.log; do \
-	    	if [ -e build/src/test/regress/$$l ]; then \
-		    echo "********* $$l *******"; \
-		    cat build/src/test/regress/$$l; \
-		fi; \
+	if ! make -C build check-world EXTRA_REGRESS_OPTS='--host=/tmp --port=$(shell perl -le 'print 1024 + int(rand(64000))')'; then \
+	    for l in `find build -name regression.diffs -o -name initdb.log -o -name postmaster.log`; do \
+		echo "******** $$l ********"; \
+		tail -n100 $$l; \
 	    done; \
 	    $(TESTSUITE_FAIL_CMD); \
 	fi
@@ -150,37 +164,6 @@ endif
 
 override_dh_strip:
 	dh_strip --dbg-package=postgresql-$(MAJOR_VER)-dbg
-
-# run tests in contrib in temporary test installations, using programs
-# from local tree
-contrib-check:
-	set -e; cd build/contrib; \
-	for d in *; do \
-	    [ -d $$d/sql ] || continue; \
-	    echo "==============  Running tests in $$d"; \
-	    (cd $$d; \
-	    if ! ../../src/test/regress/pg_regress --top-builddir=../.. --temp-install=tmp_check --dbname=contrib_regression `cd sql; ls *.sql | sed 's/.sql$$//'`; then \
-		 cat regression.diffs; \
-	    fi); \
-	done
-
-# run tests in contrib in temporary test installation, using programs
-# from system installation
-contrib-installcheck:
-	# set up temporary db
-	rm -rf tmp_data
-	mkdir tmp_data
-	/usr/lib/postgresql/$(MAJOR_VER)/bin/initdb -D tmp_data
-	/usr/lib/postgresql/$(MAJOR_VER)/bin/pg_ctl -D tmp_data -l tmp_data/postgres.log -o '-k /tmp' start
-	# wait until it started up
-	while !/usr/lib/postgresql/$(MAJOR_VER)/bin/psql -h /tmp -l >/dev/null 2>&1; do sleep 1; done
-	sleep 1
-	while !/usr/lib/postgresql/$(MAJOR_VER)/bin/psql -h /tmp -l >/dev/null 2>&1; do sleep 1; done
-	# run the tests
-	-cd build/contrib; make installcheck
-	/usr/lib/postgresql/$(MAJOR_VER)/bin/pg_ctl -D tmp_data stop
-	# find and print the regression diffs
-	find build/contrib/ -name regression.diffs -exec cat '{}' \;
 
 override_dh_builddeb:
 	dh_builddeb -- -Zxz
