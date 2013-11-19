@@ -6,6 +6,7 @@
 
 #include "postgres.h"
 
+#include "access/htup_details.h"
 #include "access/transam.h"
 #include "funcapi.h"
 #include "catalog/pg_proc.h"
@@ -493,8 +494,8 @@ PLy_procedure_munge_source(const char *name, const char *src)
 	char	   *mrc,
 			   *mp;
 	const char *sp;
-	size_t		mlen,
-				plen;
+	size_t		mlen;
+	int			plen;
 
 	/*
 	 * room for function source and the def statement

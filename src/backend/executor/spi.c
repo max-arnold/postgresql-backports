@@ -3,7 +3,7 @@
  * spi.c
  *				Server Programming Interface
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -14,6 +14,7 @@
  */
 #include "postgres.h"
 
+#include "access/htup_details.h"
 #include "access/printtup.h"
 #include "access/sysattr.h"
 #include "access/xact.h"
@@ -125,6 +126,7 @@ SPI_connect(void)
 	_SPI_current->processed = 0;
 	_SPI_current->lastoid = InvalidOid;
 	_SPI_current->tuptable = NULL;
+	slist_init(&_SPI_current->tuptables);
 	_SPI_current->procCxt = NULL;		/* in case we fail to create 'em */
 	_SPI_current->execCxt = NULL;
 	_SPI_current->connectSubid = GetCurrentSubTransactionId();
@@ -165,7 +167,7 @@ SPI_finish(void)
 	/* Restore memory context as it was before procedure call */
 	MemoryContextSwitchTo(_SPI_current->savedcxt);
 
-	/* Release memory used in procedure call */
+	/* Release memory used in procedure call (including tuptables) */
 	MemoryContextDelete(_SPI_current->execCxt);
 	_SPI_current->execCxt = NULL;
 	MemoryContextDelete(_SPI_current->procCxt);
@@ -281,11 +283,35 @@ AtEOSubXact_SPI(bool isCommit, SubTransactionId mySubid)
 	 */
 	if (_SPI_current && !isCommit)
 	{
+		slist_mutable_iter siter;
+
 		/* free Executor memory the same as _SPI_end_call would do */
 		MemoryContextResetAndDeleteChildren(_SPI_current->execCxt);
-		/* throw away any partially created tuple-table */
-		SPI_freetuptable(_SPI_current->tuptable);
-		_SPI_current->tuptable = NULL;
+
+		/* throw away any tuple tables created within current subxact */
+		slist_foreach_modify(siter, &_SPI_current->tuptables)
+		{
+			SPITupleTable *tuptable;
+
+			tuptable = slist_container(SPITupleTable, next, siter.cur);
+			if (tuptable->subid >= mySubid)
+			{
+				/*
+				 * If we used SPI_freetuptable() here, its internal search of
+				 * the tuptables list would make this operation O(N^2).
+				 * Instead, just free the tuptable manually.  This should
+				 * match what SPI_freetuptable() does.
+				 */
+				slist_delete_current(&siter);
+				if (tuptable == _SPI_current->tuptable)
+					_SPI_current->tuptable = NULL;
+				if (tuptable == SPI_tuptable)
+					SPI_tuptable = NULL;
+				MemoryContextDelete(tuptable->tuptabcxt);
+			}
+		}
+		/* in particular we should have gotten rid of any in-progress table */
+		Assert(_SPI_current->tuptable == NULL);
 	}
 }
 
@@ -1014,8 +1040,59 @@ SPI_freetuple(HeapTuple tuple)
 void
 SPI_freetuptable(SPITupleTable *tuptable)
 {
-	if (tuptable != NULL)
-		MemoryContextDelete(tuptable->tuptabcxt);
+	bool		found = false;
+
+	/* ignore call if NULL pointer */
+	if (tuptable == NULL)
+		return;
+
+	/*
+	 * Since this function might be called during error recovery, it seems
+	 * best not to insist that the caller be actively connected.  We just
+	 * search the topmost SPI context, connected or not.
+	 */
+	if (_SPI_connected >= 0)
+	{
+		slist_mutable_iter siter;
+
+		if (_SPI_current != &(_SPI_stack[_SPI_connected]))
+			elog(ERROR, "SPI stack corrupted");
+
+		/* find tuptable in active list, then remove it */
+		slist_foreach_modify(siter, &_SPI_current->tuptables)
+		{
+			SPITupleTable *tt;
+
+			tt = slist_container(SPITupleTable, next, siter.cur);
+			if (tt == tuptable)
+			{
+				slist_delete_current(&siter);
+				found = true;
+				break;
+			}
+		}
+	}
+
+	/*
+	 * Refuse the deletion if we didn't find it in the topmost SPI context.
+	 * This is primarily a guard against double deletion, but might prevent
+	 * other errors as well.  Since the worst consequence of not deleting a
+	 * tuptable would be a transient memory leak, this is just a WARNING.
+	 */
+	if (!found)
+	{
+		elog(WARNING, "attempt to delete invalid SPITupleTable %p", tuptable);
+		return;
+	}
+
+	/* for safety, reset global variables that might point at tuptable */
+	if (tuptable == _SPI_current->tuptable)
+		_SPI_current->tuptable = NULL;
+	if (tuptable == SPI_tuptable)
+		SPI_tuptable = NULL;
+
+	/* release all memory belonging to tuptable */
+	MemoryContextDelete(tuptable->tuptabcxt);
 }
 
 
@@ -1569,7 +1646,7 @@ SPI_result_code_string(int code)
  * CachedPlanSources.
  *
  * This is exported so that pl/pgsql can use it (this beats letting pl/pgsql
- * look directly into the SPIPlan for itself).  It's not documented in
+ * look directly into the SPIPlan for itself).	It's not documented in
  * spi.sgml because we'd just as soon not have too many places using this.
  */
 List *
@@ -1585,7 +1662,7 @@ SPI_plan_get_plan_sources(SPIPlanPtr plan)
  * return NULL.  Caller is responsible for doing ReleaseCachedPlan().
  *
  * This is exported so that pl/pgsql can use it (this beats letting pl/pgsql
- * look directly into the SPIPlan for itself).  It's not documented in
+ * look directly into the SPIPlan for itself).	It's not documented in
  * spi.sgml because we'd just as soon not have too many places using this.
  */
 CachedPlan *
@@ -1649,6 +1726,8 @@ spi_dest_startup(DestReceiver *self, int operation, TupleDesc typeinfo)
 	if (_SPI_current->tuptable != NULL)
 		elog(ERROR, "improper call to spi_dest_startup");
 
+	/* We create the tuple table context as a child of procCxt */
+
 	oldcxt = _SPI_procmem();	/* switch to procedure memory context */
 
 	tuptabcxt = AllocSetContextCreate(CurrentMemoryContext,
@@ -1659,8 +1738,18 @@ spi_dest_startup(DestReceiver *self, int operation, TupleDesc typeinfo)
 	MemoryContextSwitchTo(tuptabcxt);
 
 	_SPI_current->tuptable = tuptable = (SPITupleTable *)
-		palloc(sizeof(SPITupleTable));
+		palloc0(sizeof(SPITupleTable));
 	tuptable->tuptabcxt = tuptabcxt;
+	tuptable->subid = GetCurrentSubTransactionId();
+
+	/*
+	 * The tuptable is now valid enough to be freed by AtEOSubXact_SPI, so put
+	 * it onto the SPI context's tuptables list.  This will ensure it's not
+	 * leaked even in the unlikely event the following few lines fail.
+	 */
+	slist_push_head(&_SPI_current->tuptables, &tuptable->next);
+
+	/* set up initial allocations */
 	tuptable->alloced = tuptable->free = 128;
 	tuptable->vals = (HeapTuple *) palloc(tuptable->alloced * sizeof(HeapTuple));
 	tuptable->tupdesc = CreateTupleDescCopy(typeinfo);
@@ -1970,7 +2059,7 @@ _SPI_execute_plan(SPIPlanPtr plan, ParamListInfo paramLI,
 				stmt_list = pg_analyze_and_rewrite_params(parsetree,
 														  src,
 														  plan->parserSetup,
-														  plan->parserSetupArg);
+													   plan->parserSetupArg);
 			}
 			else
 			{
@@ -1989,7 +2078,7 @@ _SPI_execute_plan(SPIPlanPtr plan, ParamListInfo paramLI,
 							   plan->parserSetup,
 							   plan->parserSetupArg,
 							   plan->cursor_options,
-							   false);		/* not fixed result */
+							   false);	/* not fixed result */
 		}
 
 		/*
@@ -2092,8 +2181,8 @@ _SPI_execute_plan(SPIPlanPtr plan, ParamListInfo paramLI,
 
 				ProcessUtility(stmt,
 							   plansource->query_string,
+							   PROCESS_UTILITY_QUERY,
 							   paramLI,
-							   false,	/* not top level */
 							   dest,
 							   completionTag);
 
@@ -2102,25 +2191,31 @@ _SPI_execute_plan(SPIPlanPtr plan, ParamListInfo paramLI,
 					_SPI_current->processed = _SPI_current->tuptable->alloced -
 						_SPI_current->tuptable->free;
 
+				res = SPI_OK_UTILITY;
+
 				/*
-				 * CREATE TABLE AS is a messy special case for historical
-				 * reasons.  We must set _SPI_current->processed even though
-				 * the tuples weren't returned to the caller, and we must
-				 * return a special result code if the statement was spelled
-				 * SELECT INTO.
+				 * Some utility statements return a row count, even though the
+				 * tuples are not returned to the caller.
 				 */
 				if (IsA(stmt, CreateTableAsStmt))
 				{
 					Assert(strncmp(completionTag, "SELECT ", 7) == 0);
 					_SPI_current->processed = strtoul(completionTag + 7,
 													  NULL, 10);
+
+					/*
+					 * For historical reasons, if CREATE TABLE AS was spelled
+					 * as SELECT INTO, return a special return code.
+					 */
 					if (((CreateTableAsStmt *) stmt)->is_select_into)
 						res = SPI_OK_SELINTO;
-					else
-						res = SPI_OK_UTILITY;
 				}
-				else
-					res = SPI_OK_UTILITY;
+				else if (IsA(stmt, CopyStmt))
+				{
+					Assert(strncmp(completionTag, "COPY ", 5) == 0);
+					_SPI_current->processed = strtoul(completionTag + 5,
+													  NULL, 10);
+				}
 			}
 
 			/*

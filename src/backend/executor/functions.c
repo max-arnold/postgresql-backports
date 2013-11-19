@@ -3,7 +3,7 @@
  * functions.c
  *	  Execution of SQL-language functions
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -14,6 +14,7 @@
  */
 #include "postgres.h"
 
+#include "access/htup_details.h"
 #include "access/xact.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type.h"
@@ -830,8 +831,8 @@ postquel_getnext(execution_state *es, SQLFunctionCachePtr fcache)
 						(Node *) es->qd->plannedstmt :
 						es->qd->utilitystmt),
 					   fcache->src,
+					   PROCESS_UTILITY_QUERY,
 					   es->qd->params,
-					   false,	/* not top level */
 					   es->qd->dest,
 					   NULL);
 		result = true;			/* never stops early */
@@ -1635,7 +1636,7 @@ check_sql_fn_retval(Oid func_id, Oid rettype, List *queryTreeList,
 												 rettype,
 												 -1,
 												 get_typcollation(rettype),
-												 COERCE_DONTCARE);
+												 COERCE_IMPLICIT_CAST);
 			/* Relabel is dangerous if TLE is a sort/group or setop column */
 			if (tle->ressortgroupref != 0 || parse->setOperations)
 				*modifyTargetList = true;
@@ -1681,7 +1682,7 @@ check_sql_fn_retval(Oid func_id, Oid rettype, List *queryTreeList,
 														 rettype,
 														 -1,
 												   get_typcollation(rettype),
-														 COERCE_DONTCARE);
+													   COERCE_IMPLICIT_CAST);
 					/* Relabel is dangerous if sort/group or setop column */
 					if (tle->ressortgroupref != 0 || parse->setOperations)
 						*modifyTargetList = true;
@@ -1785,7 +1786,7 @@ check_sql_fn_retval(Oid func_id, Oid rettype, List *queryTreeList,
 														 atttype,
 														 -1,
 												   get_typcollation(atttype),
-														 COERCE_DONTCARE);
+													   COERCE_IMPLICIT_CAST);
 					/* Relabel is dangerous if sort/group or setop column */
 					if (tle->ressortgroupref != 0 || parse->setOperations)
 						*modifyTargetList = true;

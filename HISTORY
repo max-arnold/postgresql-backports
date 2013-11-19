@@ -17,6 +17,828 @@
    review, so each item is truly a community effort.
      __________________________________________________________________
 
+                                Release 9.3.1
+
+     Release Date: 2013-10-10
+
+   This release contains a variety of fixes from 9.3.0. For information
+   about new features in the 9.3 major release, see the Section called
+   Release 9.3.
+     __________________________________________________________________
+
+Migration to Version 9.3.1
+
+   A dump/restore is not required for those running 9.3.X.
+     __________________________________________________________________
+
+Changes
+
+     * Update hstore extension with JSON functionality (Andrew Dunstan)
+       Users who installed hstore prior to 9.3.1 must execute:
+ALTER EXTENSION hstore UPDATE;
+       to add two new JSON functions and a cast.
+     * Fix memory leak when creating range indexes (Heikki Linnakangas)
+     * Serializable snapshot fixes (Kevin Grittner, Heikki Linnakangas)
+     * Fix libpq SSL deadlock bug (Stephen Frost)
+     * Fix timeline handling bugs in pg_receivexlog (Heikki Linnakangas,
+       Andrew Gierth)
+     * Prevent "CREATE FUNCTION" from checking "SET" variables unless
+       function body checking is enabled (Tom Lane)
+     * Remove rare inaccurate warning during vacuum of index-less tables
+       (Heikki Linnakangas)
+     __________________________________________________________________
+
+                                 Release 9.3
+
+     Release Date: 2013-09-09
+     __________________________________________________________________
+
+Overview
+
+   Major enhancements in PostgreSQL 9.3 include:
+
+     * Add materialized views
+     * Make simple views auto-updatable
+     * Add many features for the JSON data type, including operators and
+       functions to extract elements from JSON values
+     * Implement SQL-standard LATERAL option for FROM-clause subqueries
+       and function calls
+     * Allow foreign data wrappers to support writes
+       (inserts/updates/deletes) on foreign tables
+     * Add a Postgres foreign data wrapper to allow access to other
+       Postgres servers
+     * Add support for event triggers
+     * Add optional ability to checksum data pages and report corruption
+     * Prevent non-key-field row updates from blocking foreign key checks
+     * Greatly reduce System V shared memory requirements
+
+   The above items are explained in more detail in the sections below.
+     __________________________________________________________________
+
+Migration to Version 9.3
+
+   A dump/restore using pg_dumpall, or use of pg_upgrade, is required for
+   those wishing to migrate data from any previous release.
+
+   Version 9.3 contains a number of changes that may affect compatibility
+   with previous releases. Observe the following incompatibilities:
+     __________________________________________________________________
+
+Server Settings
+
+     * Rename replication_timeout to wal_sender_timeout (Amit Kapila)
+       This setting controls the WAL sender timeout.
+     * Require superuser privileges to set commit_delay because it can now
+       potentially delay other sessions (Simon Riggs)
+     * Allow in-memory sorts to use their full memory allocation (Jeff
+       Janes)
+       Users who have set work_mem based on the previous behavior may need
+       to revisit that setting.
+     __________________________________________________________________
+
+Other
+
+     * Throw an error if a tuple to be updated or deleted has already been
+       updated or deleted by a BEFORE trigger (Kevin Grittner)
+       Formerly, the originally-intended update was silently skipped,
+       resulting in logical inconsistency since the trigger might have
+       propagated data to other places based on the intended update. Now
+       an error is thrown to prevent the inconsistent results from being
+       committed. If this change affects your application, the best
+       solution is usually to move the data-propagation actions to an
+       AFTER trigger.
+       This error will also be thrown if a query invokes a volatile
+       function that modifies rows that are later modified by the query
+       itself. Such cases likewise previously resulted in silently
+       skipping updates.
+     * Change multicolumn ON UPDATE SET NULL/SET DEFAULT foreign key
+       actions to affect all columns of the constraint, not just those
+       changed in the "UPDATE" (Tom Lane)
+       Previously, we would set only those referencing columns that
+       correspond to referenced columns that were changed by the "UPDATE".
+       This was what was required by SQL-92, but more recent editions of
+       the SQL standard specify the new behavior.
+     * Force cached plans to be replanned if the search_path changes (Tom
+       Lane)
+       Previously, cached plans already generated in the current session
+       were not redone if the query was re-executed with a new search_path
+       setting, resulting in surprising behavior.
+     * Fix to_number() to properly handle a period used as a thousands
+       separator (Tom Lane)
+       Previously, a period was considered to be a decimal point even when
+       the locale says it isn't and the D format code is used to specify
+       use of the locale-specific decimal point. This resulted in wrong
+       answers if FM format was also used.
+     * Fix STRICT non-set-returning functions that have set-returning
+       functions in their arguments to properly return null rows (Tom
+       Lane)
+       A null value passed to the strict function should result in a null
+       output, but instead, that output row was suppressed entirely.
+     * Store WAL in a continuous stream, rather than skipping the last
+       16MB segment every 4GB (Heikki Linnakangas)
+       Previously, WAL files with names ending in FF were not used because
+       of this skipping. If you have WAL backup or restore scripts that
+       took this behavior into account, they will need to be adjusted.
+     * In pg_constraint.confmatchtype, store the default foreign key match
+       type (non-FULL, non-PARTIAL) as s for "simple" (Tom Lane)
+       Previously this case was represented by u for "unspecified".
+     __________________________________________________________________
+
+Changes
+
+   Below you will find a detailed account of the changes between
+   PostgreSQL 9.3 and the previous major release.
+     __________________________________________________________________
+
+Server
+
+Locking
+
+     * Prevent non-key-field row updates from blocking foreign key checks
+       (Alvaro Herrera, Noah Misch, Andres Freund, Alexander Shulgin,
+       Marti Raudsepp, Alexander Shulgin)
+       This change improves concurrency and reduces the probability of
+       deadlocks when updating tables involved in a foreign-key
+       constraint. "UPDATE"s that do not change any columns referenced in
+       a foreign key now take the new NO KEY UPDATE lock mode on the row,
+       while foreign key checks use the new KEY SHARE lock mode, which
+       does not conflict with NO KEY UPDATE. So there is no blocking
+       unless a foreign-key column is changed.
+     * Add configuration variable lock_timeout to allow limiting how long
+       a session will wait to acquire any one lock (Zoltan Boszormenyi)
+     __________________________________________________________________
+
+Indexes
+
+     * Add SP-GiST support for range data types (Alexander Korotkov)
+     * Allow GiST indexes to be unlogged (Jeevan Chalke)
+     * Improve performance of GiST index insertion by randomizing the
+       choice of which page to descend to when there are multiple equally
+       good alternatives (Heikki Linnakangas)
+     * Improve concurrency of hash index operations (Robert Haas)
+     __________________________________________________________________
+
+Optimizer
+
+     * Collect and use histograms of upper and lower bounds, as well as
+       range lengths, for range types (Alexander Korotkov)
+     * Improve optimizer's cost estimation for index access (Tom Lane)
+     * Improve optimizer's hash table size estimate for doing DISTINCT via
+       hash aggregation (Tom Lane)
+     * Suppress no-op Result and Limit plan nodes (Kyotaro Horiguchi, Amit
+       Kapila, Tom Lane)
+     * Reduce optimizer overhead by not keeping plans on the basis of
+       cheap startup cost when the optimizer only cares about total cost
+       overall (Tom Lane)
+     __________________________________________________________________
+
+General Performance
+
+     * Add "COPY FREEZE" option to avoid the overhead of marking tuples as
+       frozen later (Simon Riggs, Jeff Davis)
+     * Improve performance of NUMERIC calculations (Kyotaro Horiguchi)
+     * Improve synchronization of sessions waiting for commit_delay (Peter
+       Geoghegan)
+       This greatly improves the usefulness of commit_delay.
+     * Improve performance of the "CREATE TEMPORARY TABLE ... ON COMMIT
+       DELETE ROWS" option by not truncating such temporary tables in
+       transactions that haven't touched any temporary tables (Heikki
+       Linnakangas)
+     * Make vacuum recheck visibility after it has removed expired tuples
+       (Pavan Deolasee)
+       This increases the chance of a page being marked as all-visible.
+     * Add per-resource-owner lock caches (Jeff Janes)
+       This speeds up lock bookkeeping at statement completion in
+       multi-statement transactions that hold many locks; it is
+       particularly useful for pg_dump.
+     * Avoid scanning the entire relation cache at commit of a transaction
+       that creates a new relation (Jeff Janes)
+       This speeds up sessions that create many tables in successive small
+       transactions, such as a pg_restore run.
+     * Improve performance of transactions that drop many relations (Tomas
+       Vondra)
+     __________________________________________________________________
+
+Monitoring
+
+     * Add optional ability to checksum data pages and report corruption
+       (Simon Riggs, Jeff Davis, Greg Smith, Ants Aasma)
+       The checksum option can be set during initdb.
+     * Split the statistics collector's data file into separate global and
+       per-database files (Tomas Vondra)
+       This reduces the I/O required for statistics tracking.
+     * Fix the statistics collector to operate properly in cases where the
+       system clock goes backwards (Tom Lane)
+       Previously, statistics collection would stop until the time again
+       reached the latest time previously recorded.
+     * Emit an informative message to postmaster standard error when we
+       are about to stop logging there (Tom Lane)
+       This should help reduce user confusion about where to look for log
+       output in common configurations that log to standard error only
+       during postmaster startup.
+     __________________________________________________________________
+
+Authentication
+
+     * When an authentication failure occurs, log the relevant
+       "pg_hba.conf" line, to ease debugging of unintended failures
+       (Magnus Hagander)
+     * Improve LDAP error reporting and documentation (Peter Eisentraut)
+     * Add support for specifying LDAP authentication parameters in URL
+       format, per RFC 4516 (Peter Eisentraut)
+     * Change the ssl_ciphers parameter to start with DEFAULT, rather than
+       ALL, then remove insecure ciphers (Magnus Hagander)
+       This should yield a more appropriate SSL cipher set.
+     * Parse and load "pg_ident.conf" once, not during each connection
+       (Amit Kapila)
+       This is similar to how "pg_hba.conf" is processed.
+     __________________________________________________________________
+
+Server Settings
+
+     * Greatly reduce System V shared memory requirements (Robert Haas)
+       On Unix-like systems, mmap() is now used for most of PostgreSQL's
+       shared memory. For most users, this will eliminate any need to
+       adjust kernel parameters for shared memory.
+     * Allow the postmaster to listen on multiple Unix-domain sockets
+       (Honza Horak)
+       The configuration parameter unix_socket_directory is replaced by
+       unix_socket_directories, which accepts a list of directories.
+     * Allow a directory of configuration files to be processed (Magnus
+       Hagander, Greg Smith, Selena Deckelmann)
+       Such a directory is specified with include_dir in the server
+       configuration file.
+     * Increase the maximum initdb-configured value for shared_buffers to
+       128MB (Robert Haas)
+       This is the maximum value that initdb will attempt to set in
+       "postgresql.conf"; the previous maximum was 32MB.
+     * Remove the external PID file, if any, on postmaster exit (Peter
+       Eisentraut)
+     __________________________________________________________________
+
+Replication and Recovery
+
+     * Allow a streaming replication standby to follow a timeline switch
+       (Heikki Linnakangas)
+       This allows streaming standby servers to receive WAL data from a
+       slave newly promoted to master status. Previously, other standbys
+       would require a resync to begin following the new master.
+     * Add SQL functions pg_is_in_backup() and pg_backup_start_time()
+       (Gilles Darold)
+       These functions report the status of base backups.
+     * Improve performance of streaming log shipping with
+       synchronous_commit disabled (Andres Freund)
+     * Allow much faster promotion of a streaming standby to primary
+       (Simon Riggs, Kyotaro Horiguchi)
+     * Add the last checkpoint's redo location to pg_controldata's output
+       (Fujii Masao)
+       This information is useful for determining which WAL files are
+       needed for restore.
+     * Allow tools like pg_receivexlog to run on computers with different
+       architectures (Heikki Linnakangas)
+       WAL files can still only be replayed on servers with the same
+       architecture as the primary; but they can now be transmitted to and
+       stored on machines of any architecture, since the streaming
+       replication protocol is now machine-independent.
+     * Make pg_basebackup "--write-recovery-conf" output a minimal
+       "recovery.conf" file (Zoltan Boszormenyi, Magnus Hagander)
+       This simplifies setting up a standby server.
+     * Allow pg_receivexlog and pg_basebackup "--xlog-method" to handle
+       streaming timeline switches (Heikki Linnakangas)
+     * Add wal_receiver_timeout parameter to control the WAL receiver's
+       timeout (Amit Kapila)
+       This allows more rapid detection of connection failure.
+     * Change the WAL record format to allow splitting the record header
+       across pages (Heikki Linnakangas)
+       The new format is slightly more compact, and is more efficient to
+       write.
+     __________________________________________________________________
+
+Queries
+
+     * Implement SQL-standard LATERAL option for FROM-clause subqueries
+       and function calls (Tom Lane)
+       This feature allows subqueries and functions in FROM to reference
+       columns from other tables in the FROM clause. The LATERAL keyword
+       is optional for functions.
+     * Add support for piping "COPY" and psql "\copy" data to/from an
+       external program (Etsuro Fujita)
+     * Allow a multirow VALUES clause in a rule to reference OLD/NEW (Tom
+       Lane)
+     __________________________________________________________________
+
+Object Manipulation
+
+     * Add support for event triggers (Dimitri Fontaine, Robert Haas,
+       Alvaro Herrera)
+       This allows server-side functions written in event-enabled
+       languages to be called when DDL commands are run.
+     * Allow foreign data wrappers to support writes
+       (inserts/updates/deletes) on foreign tables (KaiGai Kohei)
+     * Add "CREATE SCHEMA ... IF NOT EXISTS" clause (Fabrizio de Royes
+       Mello)
+     * Make "REASSIGN OWNED" also change ownership of shared objects
+       (Alvaro Herrera)
+     * Make "CREATE AGGREGATE" complain if the given initial value string
+       is not valid input for the transition datatype (Tom Lane)
+     * Suppress "CREATE TABLE"'s messages about implicit index and
+       sequence creation (Robert Haas)
+       These messages now appear at DEBUG1 verbosity, so that they will
+       not be shown by default.
+     * Allow "DROP TABLE IF EXISTS" to succeed when a non-existent schema
+       is specified in the table name (Bruce Momjian)
+       Previously, it threw an error if the schema did not exist.
+     * Provide clients with constraint violation details as separate
+       fields (Pavel Stehule)
+       This allows clients to retrieve table, column, data type, or
+       constraint name error details. Previously such information had to
+       be extracted from error strings. Client library support is required
+       to access these fields.
+     __________________________________________________________________
+
+ALTER
+
+     * Support IF NOT EXISTS option in "ALTER TYPE ... ADD VALUE" (Andrew
+       Dunstan)
+       This is useful for conditionally adding values to enumerated types.
+     * Add "ALTER ROLE ALL SET" to establish settings for all users (Peter
+       Eisentraut)
+       This allows settings to apply to all users in all databases. "ALTER
+       DATABASE SET" already allowed addition of settings for all users in
+       a single database. "postgresql.conf" has a similar effect.
+     * Add support for "ALTER RULE ... RENAME" (Ali Dar)
+     __________________________________________________________________
+
+VIEWs
+
+     * Add materialized views (Kevin Grittner)
+       Unlike ordinary views, where the base tables are read on every
+       access, materialized views create physical tables at creation or
+       refresh time. Access to the materialized view then reads from its
+       physical table. There is not yet any facility for incrementally
+       refreshing materialized views or auto-accessing them via base table
+       access.
+     * Make simple views auto-updatable (Dean Rasheed)
+       Simple views that reference some or all columns from a single base
+       table are now updatable by default. More complex views can be made
+       updatable using INSTEAD OF triggers or INSTEAD rules.
+     * Add "CREATE RECURSIVE VIEW" syntax (Peter Eisentraut)
+       Internally this is translated into "CREATE VIEW ... WITH RECURSIVE
+       ...".
+     * Improve view/rule printing code to handle cases where referenced
+       tables are renamed, or columns are renamed, added, or dropped (Tom
+       Lane)
+       Table and column renamings can produce cases where, if we merely
+       substitute the new name into the original text of a rule or view,
+       the result is ambiguous. This change fixes the rule-dumping code to
+       insert manufactured table and column aliases when needed to
+       preserve the original semantics.
+     __________________________________________________________________
+
+Data Types
+
+     * Increase the maximum size of large objects from 2GB to 4TB (Nozomi
+       Anzai, Yugo Nagata)
+       This change includes adding 64-bit-capable large object access
+       functions, both in the server and in libpq.
+     * Allow text timezone designations, e.g. "America/Chicago", in the
+       "T" field of ISO-format timestamptz input (Bruce Momjian)
+     __________________________________________________________________
+
+JSON
+
+     * Add operators and functions to extract elements from JSON values
+       (Andrew Dunstan)
+     * Allow JSON values to be converted into records (Andrew Dunstan)
+     * Add functions to convert scalars, records, and hstore values to
+       JSON (Andrew Dunstan)
+     __________________________________________________________________
+
+Functions
+
+     * Add array_remove() and array_replace() functions (Marco Nenciarini,
+       Gabriele Bartolini)
+     * Allow concat() and format() to properly expand VARIADIC-labeled
+       arguments (Pavel Stehule)
+     * Improve format() to provide field width and left/right alignment
+       options (Pavel Stehule)
+     * Make to_char(), to_date(), and to_timestamp() handle negative (BC)
+       century values properly (Bruce Momjian)
+       Previously the behavior was either wrong or inconsistent with
+       positive/AD handling, e.g. with the format mask "IYYY-IW-DY".
+     * Make to_date() and to_timestamp() return proper results when mixing
+       ISO and Gregorian week/day designations (Bruce Momjian)
+     * Cause pg_get_viewdef() to start a new line by default after each
+       SELECT target list entry and FROM entry (Marko Tiikkaja)
+       This reduces line length in view printing, for instance in pg_dump
+       output.
+     * Fix map_sql_value_to_xml_value() to print values of domain types
+       the same way their base type would be printed (Pavel Stehule)
+       There are special formatting rules for certain built-in types such
+       as boolean; these rules now also apply to domains over these types.
+     __________________________________________________________________
+
+Server-Side Languages
+
+PL/pgSQL Server-Side Language
+
+     * Allow PL/pgSQL to use RETURN with a composite-type expression (Asif
+       Rehman)
+       Previously, in a function returning a composite type, RETURN could
+       only reference a variable of that type.
+     * Allow PL/pgSQL to access constraint violation details as separate
+       fields (Pavel Stehule)
+     * Allow PL/pgSQL to access the number of rows processed by "COPY"
+       (Pavel Stehule)
+       A "COPY" executed in a PL/pgSQL function now updates the value
+       retrieved by "GET DIAGNOSTICS x = ROW_COUNT".
+     * Allow unreserved keywords to be used as identifiers everywhere in
+       PL/pgSQL (Tom Lane)
+       In certain places in the PL/pgSQL grammar, keywords had to be
+       quoted to be used as identifiers, even if they were nominally
+       unreserved.
+     __________________________________________________________________
+
+PL/Python Server-Side Language
+
+     * Add PL/Python result object string handler (Peter Eisentraut)
+       This allows plpy.debug(rv) to output something reasonable.
+     * Make PL/Python convert OID values to a proper Python numeric type
+       (Peter Eisentraut)
+     * Handle SPI errors raised explicitly (with PL/Python's RAISE) the
+       same as internal SPI errors (Oskari Saarenmaa and Jan Urbanski)
+     __________________________________________________________________
+
+Server Programming Interface (SPI)
+
+     * Prevent leakage of SPI tuple tables during subtransaction abort
+       (Tom Lane)
+       At the end of any failed subtransaction, the core SPI code now
+       releases any SPI tuple tables that were created during that
+       subtransaction. This avoids the need for SPI-using code to keep
+       track of such tuple tables and release them manually in
+       error-recovery code. Failure to do so caused a number of
+       transaction-lifespan memory leakage issues in PL/pgSQL and perhaps
+       other SPI clients. SPI_freetuptable() now protects itself against
+       multiple freeing requests, so any existing code that did take care
+       to clean up shouldn't be broken by this change.
+     * Allow SPI functions to access the number of rows processed by
+       "COPY" (Pavel Stehule)
+     __________________________________________________________________
+
+Client Applications
+
+     * Add command-line utility pg_isready to check if the server is ready
+       to accept connections (Phil Sorber)
+     * Support multiple "--table" arguments for pg_restore, clusterdb,
+       reindexdb, and vacuumdb (Josh Kupershmidt)
+       This is similar to the way pg_dump's "--table" option works.
+     * Add "--dbname" option to pg_dumpall, pg_basebackup, and
+       pg_receivexlog to allow specifying a connection string (Amit
+       Kapila)
+     * Add libpq function PQconninfo() to return connection information
+       (Zoltan Boszormenyi, Magnus Hagander)
+     __________________________________________________________________
+
+psql
+
+     * Adjust function cost settings so psql tab completion and pattern
+       searching are more efficient (Tom Lane)
+     * Improve psql's tab completion coverage (Jeff Janes, Dean Rasheed,
+       Peter Eisentraut, Magnus Hagander)
+     * Allow the psql "--single-transaction" mode to work when reading
+       from standard input (Fabien Coelho, Robert Haas)
+       Previously this option only worked when reading from a file.
+     * Remove psql warning when connecting to an older server (Peter
+       Eisentraut)
+       A warning is still issued when connecting to a server of a newer
+       major version than psql's.
+     __________________________________________________________________
+
+Backslash Commands
+
+     * Add psql command "\watch" to repeatedly execute a SQL command (Will
+       Leinweber)
+     * Add psql command "\gset" to store query results in psql variables
+       (Pavel Stehule)
+     * Add SSL information to psql's "\conninfo" command (Alastair Turner)
+     * Add "Security" column to psql's "\df+" output (Jon Erdman)
+     * Allow psql command "\l" to accept a database name pattern (Peter
+       Eisentraut)
+     * In psql, do not allow "\connect" to use defaults if there is no
+       active connection (Bruce Momjian)
+       This might be the case if the server had crashed.
+     * Properly reset state after failure of a SQL command executed with
+       psql's \g "file" (Tom Lane)
+       Previously, the output from subsequent SQL commands would
+       unexpectedly continue to go to the same file.
+     __________________________________________________________________
+
+Output
+
+     * Add a latex-longtable output format to psql (Bruce Momjian)
+       This format allows tables to span multiple pages.
+     * Add a border=3 output mode to the psql latex format (Bruce Momjian)
+     * In psql's tuples-only and expanded output modes, no longer emit
+       "(No rows)" for zero rows (Peter Eisentraut)
+     * In psql's unaligned, expanded output mode, no longer print an empty
+       line for zero rows (Peter Eisentraut)
+     __________________________________________________________________
+
+pg_dump
+
+     * Add pg_dump "--jobs" option to dump tables in parallel (Joachim
+       Wieland)
+     * Make pg_dump output functions in a more predictable order (Joel
+       Jacobson)
+     * Fix tar files emitted by pg_dump to be POSIX conformant (Brian
+       Weaver, Tom Lane)
+     * Add "--dbname" option to pg_dump, for consistency with other client
+       commands (Heikki Linnakangas)
+       The database name could already be supplied last without a flag.
+     __________________________________________________________________
+
+initdb
+
+     * Make initdb fsync the newly created data directory (Jeff Davis)
+       This insures data integrity in event of a system crash shortly
+       after initdb. This can be disabled by using "--nosync".
+     * Add initdb "--sync-only" option to sync the data directory to
+       durable storage (Bruce Momjian)
+       This is used by pg_upgrade.
+     * Make initdb issue a warning about placing the data directory at the
+       top of a file system mount point (Bruce Momjian)
+     __________________________________________________________________
+
+Source Code
+
+     * Add infrastructure to allow plug-in background worker processes
+       (Alvaro Herrera)
+     * Create a centralized timeout API (Zoltan Boszormenyi)
+     * Create libpgcommon and move pg_malloc() and other functions there
+       (Alvaro Herrera, Andres Freund)
+       This allows libpgport to be used solely for portability-related
+       code.
+     * Add support for list links embedded in larger structs (Andres
+       Freund)
+     * Use SA_RESTART for all signals, including SIGALRM (Tom Lane)
+     * Ensure that the correct text domain is used when translating
+       errcontext() messages (Heikki Linnakangas)
+     * Standardize naming of client-side memory allocation functions (Tom
+       Lane)
+     * Provide support for "static assertions" that will fail at compile
+       time if some compile-time-constant condition is not met (Andres
+       Freund, Tom Lane)
+     * Support Assert() in client-side code (Andrew Dunstan)
+     * Add decoration to inform the C compiler that some ereport() and
+       elog() calls do not return (Peter Eisentraut, Andres Freund, Tom
+       Lane, Heikki Linnakangas)
+     * Allow options to be passed to the regression test output comparison
+       utility via PG_REGRESS_DIFF_OPTS (Peter Eisentraut)
+     * Add isolation tests for "CREATE INDEX CONCURRENTLY" (Abhijit
+       Menon-Sen)
+     * Remove typedefs for int2/int4 as they are better represented as
+       int16/int32 (Peter Eisentraut)
+     * Fix install-strip on Mac OS X (Peter Eisentraut)
+     * Remove configure flag "--disable-shared", as it is no longer
+       supported (Bruce Momjian)
+     * Rewrite pgindent in Perl (Andrew Dunstan)
+     * Provide Emacs macro to set Perl formatting to match PostgreSQL's
+       perltidy settings (Peter Eisentraut)
+     * Run tool to check the keyword list whenever the backend grammar is
+       changed (Tom Lane)
+     * Change the way UESCAPE is lexed, to significantly reduce the size
+       of the lexer tables (Heikki Linnakangas)
+     * Centralize flex and bison make rules (Peter Eisentraut)
+       This is useful for pgxs authors.
+     * Change many internal backend functions to return object OIDs rather
+       than void (Dimitri Fontaine)
+       This is useful for event triggers.
+     * Invent pre-commit/pre-prepare/pre-subcommit events for transaction
+       callbacks (Tom Lane)
+       Loadable modules that use transaction callbacks might need
+       modification to handle these new event types.
+     * Add function pg_identify_object() to produce a machine-readable
+       description of a database object (Alvaro Herrera)
+     * Add post-"ALTER"-object server hooks (KaiGai Kohei)
+     * Implement a generic binary heap and use it for Merge-Append
+       operations (Abhijit Menon-Sen)
+     * Provide a tool to help detect timezone abbreviation changes when
+       updating the "src/timezone/data" files (Tom Lane)
+     * Add pkg-config support for libpq and ecpg libraries (Peter
+       Eisentraut)
+     * Remove "src/tool/backend", now that the content is on the
+       PostgreSQL wiki (Bruce Momjian)
+     * Split out WAL reading as an independent facility (Heikki
+       Linnakangas, Andres Freund)
+     * Use a 64-bit integer to represent WAL positions (XLogRecPtr)
+       instead of two 32-bit integers (Heikki Linnakangas)
+       Generally, tools that need to read the WAL format will need to be
+       adjusted.
+     * Allow PL/Python to support platform-specific include directories
+       (Peter Eisentraut)
+     * Allow PL/Python on OS X to build against custom versions of Python
+       (Peter Eisentraut)
+     __________________________________________________________________
+
+Additional Modules
+
+     * Add a Postgres foreign data wrapper contrib module to allow access
+       to other Postgres servers (Shigeru Hanada)
+       This foreign data wrapper supports writes.
+     * Add pg_xlogdump contrib program (Andres Freund)
+     * Add support for indexing of regular-expression searches in pg_trgm
+       (Alexander Korotkov)
+     * Improve pg_trgm's handling of multibyte characters (Tom Lane)
+       On a platform that does not have the wcstombs() or towlower()
+       library functions, this could result in an incompatible change in
+       the contents of pg_trgm indexes for non-ASCII data. In such cases,
+       "REINDEX" those indexes to ensure correct search results.
+     * Add a pgstattuple function to report the size of the
+       pending-insertions list of a GIN index (Fujii Masao)
+     * Make oid2name, pgbench, and vacuumlo set fallback_application_name
+       (Amit Kapila)
+     * Improve output of pg_test_timing (Bruce Momjian)
+     * Improve output of pg_test_fsync (Peter Geoghegan)
+     * Create a dedicated foreign data wrapper, with its own option
+       validator function, for dblink (Shigeru Hanada)
+       When using this FDW to define the target of a dblink connection,
+       instead of using a hard-wired list of connection options, the
+       underlying libpq library is consulted to see what connection
+       options it supports.
+     __________________________________________________________________
+
+pg_upgrade
+
+     * Allow pg_upgrade to do dumps and restores in parallel (Bruce
+       Momjian, Andrew Dunstan)
+       This allows parallel schema dump/restore of databases, as well as
+       parallel copy/link of data files per tablespace. Use the "--jobs"
+       option to specify the level of parallelism.
+     * Make pg_upgrade create Unix-domain sockets in the current directory
+       (Bruce Momjian, Tom Lane)
+       This reduces the possibility that someone will accidentally connect
+       during the upgrade.
+     * Make pg_upgrade "--check" mode properly detect the location of
+       non-default socket directories (Bruce Momjian, Tom Lane)
+     * Improve performance of pg_upgrade for databases with many tables
+       (Bruce Momjian)
+     * Improve pg_upgrade's logs by showing executed commands (Alvaro
+       Herrera)
+     * Improve pg_upgrade's status display during copy/link (Bruce
+       Momjian)
+     __________________________________________________________________
+
+pgbench
+
+     * Add "--foreign-keys" option to pgbench (Jeff Janes)
+       This adds foreign key constraints to the standard tables created by
+       pgbench, for use in foreign key performance testing.
+     * Allow pgbench to aggregate performance statistics and produce
+       output every "--aggregate-interval" seconds (Tomas Vondra)
+     * Add pgbench "--sampling-rate" option to control the percentage of
+       transactions logged (Tomas Vondra)
+     * Reduce and improve the status message output of pgbench's
+       initialization mode (Robert Haas, Peter Eisentraut)
+     * Add pgbench "-q" mode to print one output line every five seconds
+       (Tomas Vondra)
+     * Output pgbench elapsed and estimated remaining time during
+       initialization (Tomas Vondra)
+     * Allow pgbench to use much larger scale factors, by changing
+       relevant columns from integer to bigint when the requested scale
+       factor exceeds 20000 (Greg Smith)
+     __________________________________________________________________
+
+Documentation
+
+     * Allow EPUB-format documentation to be created (Peter Eisentraut)
+     * Update FreeBSD kernel configuration documentation (Brad Davis)
+     * Improve WINDOW function documentation (Bruce Momjian, Florian
+       Pflug)
+     * Add instructions for setting up the documentation tool chain on Mac
+       OS X (Peter Eisentraut)
+     * Improve commit_delay documentation (Peter Geoghegan)
+     __________________________________________________________________
+
+                                Release 9.2.5
+
+     Release Date: 2013-10-10
+
+   This release contains a variety of fixes from 9.2.4. For information
+   about new features in the 9.2 major release, see the Section called
+   Release 9.2.
+     __________________________________________________________________
+
+Migration to Version 9.2.5
+
+   A dump/restore is not required for those running 9.2.X.
+
+   Also, if you are upgrading from a version earlier than 9.2.2, see the
+   release notes for 9.2.2.
+     __________________________________________________________________
+
+Changes
+
+     * Prevent downcasing of non-ASCII non-double-quoted identifiers in
+       multi-byte encodings (Andrew Dunstan)
+       The previous behavior was wrong and confusing.
+     * Fix memory leak when creating range indexes (Heikki Linnakangas)
+     * Fix checkpoint memory leak in background writer when wal_level =
+       hot_standby (Naoya Anzai)
+     * Fix memory leak caused by lo_open() failure (Heikki Linnakangas)
+     * Fix memory overcommit bug when work_mem is using more than 24GB of
+       memory (Stephen Frost)
+     * Serializable snapshot fixes (Kevin Grittner, Heikki Linnakangas)
+     * Fix libpq SSL deadlock bug (Stephen Frost)
+     * Fix possible SSL network stack corruption in threaded libpq
+       applications (Nick Phillips, Stephen Frost)
+     * Improve estimate of planner cost when choosing between generic and
+       custom plans (Tom Lane)
+       This change will favor generic plans when planning cost is high.
+     * Properly compute row estimates for boolean columns containing many
+       NULL values (Andrew Gierth)
+       Previously tests like col IS NOT TRUE and col IS NOT FALSE did not
+       properly factor in NULL values when estimating plan costs.
+     * Fix UNION ALL and inheritance queries to properly recheck
+       parameterized paths (Tom Lane)
+       This fixes cases where suboptimal query plans could potentially be
+       chosen.
+     * Prevent pushing down WHERE clauses into unsafe UNION/INTERSECT
+       subqueries (Tom Lane)
+       Previously such push downs could generate errors.
+     * Fix rare GROUP BY query error caused by improperly processed date
+       type modifiers (Tom Lane)
+     * Fix pg_dump of foreign tables with dropped columns (Andrew Dunstan)
+       Previously such cases could cause a pg_upgrade error.
+     * Reorder pg_dump processing of extension-related rules and event
+       triggers (Joe Conway)
+     * Force dumping of extension tables if specified by "pg_dump -t" or
+       -n (Joe Conway)
+     * Allow view dump code to better handle dropped columns on base
+       tables (Tom Lane)
+     * Fix "pg_restore -l" with the directory archive to display the
+       correct format name (Fujii Masao)
+     * Properly record index comments created using UNIQUE and PRIMARY KEY
+       syntax (Andres Freund)
+       This fixes a parallel pg_restore failure.
+     * Cause "pg_basebackup -x" with an empty xlog directory to throw an
+       error rather than crashing (Magnus Hagander, Haruka Takatsuka)
+     * Properly guarantee transmission of WAL files before clean
+       switchover (Fujii Masao)
+       Previously, the streaming replication connection might close before
+       all WAL files had been replayed on the standby.
+     * Improve WAL segment timeline handling during recovery (Heikki
+       Linnakangas)
+     * Fix "REINDEX TABLE" and "REINDEX DATABASE" to properly revalidate
+       constraints and mark invalidated indexes as valid (Noah Misch)
+       "REINDEX INDEX" has always worked properly.
+     * Avoid deadlocks during insertion into SP-GiST indexes (Teodor
+       Sigaev)
+     * Fix possible deadlock during concurrent "CREATE INDEX CONCURRENTLY"
+       operations (Tom Lane)
+     * Fix GiST index lookup crash (Tom Lane)
+     * Fix regexp_matches() handling of zero-length matches (Jeevan
+       Chalke)
+       Previously, zero-length matches like '^' could return too many
+       matches.
+     * Fix crash for overly-complex regular expressions (Heikki
+       Linnakangas)
+     * Fix regular expression match failures for back references combined
+       with non-greedy quantifiers (Jeevan Chalke)
+     * Prevent "CREATE FUNCTION" from checking "SET" variables unless
+       function body checking is enabled (Tom Lane)
+     * Allow "ALTER DEFAULT PRIVILEGES" to operate on schemas without
+       requiring CREATE permission (Tom Lane)
+     * Loosen restriction on keywords used in queries (Tom Lane)
+       Specifically, lessen keyword restrictions for role names, language
+       names, "EXPLAIN" and "COPY" options, and "SET" values. This allows
+       COPY ... (FORMAT BINARY) previously BINARY required single-quotes.
+     * Print proper line number during "COPY" failure (Heikki Linnakangas)
+     * Fix pgp_pub_decrypt() so it works for secret keys with passwords
+       (Marko Kreen)
+     * Have pg_upgrade use ">pg_dump --quote-all-identifiers" to avoid
+       problems with keyword changes between releases (Tom Lane)
+     * Remove rare inaccurate warning during vacuum of index-less tables
+       (Heikki Linnakangas)
+     * Improve analyze statistics generation after a cancelled file
+       truncate request (Kevin Grittner)
+     * Avoid possible failure when performing transaction control commands
+       (e.g "ROLLBACK") in prepared queries (Tom Lane)
+     * Allow various spellings of infinity on all platforms (Tom Lane)
+       Supported infinity values are "inf", "+inf", "-inf", "infinity",
+       "+infinity", and "-infinity".
+     * Avoid unnecessary reporting when track_activities is off (Tom Lane)
+     * Expand ability to compare rows to records and arrays (Rafal
+       Rzepecki, Tom Lane)
+     * Prevent crash when psql's PSQLRC variable contains a tilde (Bruce
+       Momjian)
+     * Add spinlock support for ARM64 (Mark Salter)
+     * Update time zone data files to tzdata release 2013d for DST law
+       changes in DST law changes in Israel, Morocco, Palestine, Paraguay.
+       Also, historical zone data corrections for Macquarie Island (Tom
+       Lane)
+     __________________________________________________________________
+
                                 Release 9.2.4
 
      Release Date: 2013-04-04
@@ -1615,6 +2437,107 @@ Documentation
        PostgreSQL has long treated these keyword as no-ops, and continues
        to do so; but in future they might mean what the SQL standard says
        they mean, so applications should avoid using them.
+     __________________________________________________________________
+
+                               Release 9.1.10
+
+     Release Date: 2013-10-10
+
+   This release contains a variety of fixes from 9.1.9. For information
+   about new features in the 9.1 major release, see the Section called
+   Release 9.1.
+     __________________________________________________________________
+
+Migration to Version 9.1.10
+
+   A dump/restore is not required for those running 9.1.X.
+
+   Also, if you are upgrading from a version earlier than 9.1.6, see the
+   release notes for 9.1.6.
+     __________________________________________________________________
+
+Changes
+
+     * Prevent downcasing of non-ASCII non-double-quoted identifiers in
+       multi-byte encodings (Andrew Dunstan)
+       The previous behavior was wrong and confusing.
+     * Fix checkpoint memory leak in background writer when wal_level =
+       hot_standby (Naoya Anzai)
+     * Fix memory leak caused by lo_open() failure (Heikki Linnakangas)
+     * Fix memory overcommit bug when work_mem is using more than 24GB of
+       memory (Stephen Frost)
+     * Serializable snapshot fixes (Kevin Grittner, Heikki Linnakangas)
+     * Fix libpq SSL deadlock bug (Stephen Frost)
+     * Fix possible SSL network stack corruption in threaded libpq
+       applications (Nick Phillips, Stephen Frost)
+     * Properly compute row estimates for boolean columns containing many
+       NULL values (Andrew Gierth)
+       Previously tests like col IS NOT TRUE and col IS NOT FALSE did not
+       properly factor in NULL values when estimating plan costs.
+     * Prevent pushing down WHERE clauses into unsafe UNION/INTERSECT
+       subqueries (Tom Lane)
+       Previously such push downs could generate errors.
+     * Fix rare GROUP BY query error caused by improperly processed date
+       type modifiers (Tom Lane)
+     * Fix pg_dump of foreign tables with dropped columns (Andrew Dunstan)
+       Previously such cases could cause a pg_upgrade error.
+     * Reorder pg_dump processing of extension-related rules and event
+       triggers (Joe Conway)
+     * Force dumping of extension tables if specified by "pg_dump -t" or
+       -n (Joe Conway)
+     * Allow view dump code to better handle dropped columns on base
+       tables (Tom Lane)
+     * Fix "pg_restore -l" with the directory archive to display the
+       correct format name (Fujii Masao)
+     * Properly record index comments created using UNIQUE and PRIMARY KEY
+       syntax (Andres Freund)
+       This fixes a parallel pg_restore failure.
+     * Properly guarantee transmission of WAL files before clean
+       switchover (Fujii Masao)
+       Previously, the streaming replication connection might close before
+       all WAL files had been replayed on the standby.
+     * Improve WAL segment timeline handling during recovery (Heikki
+       Linnakangas)
+     * Fix "REINDEX TABLE" and "REINDEX DATABASE" to properly revalidate
+       constraints and mark invalidated indexes as valid (Noah Misch)
+       "REINDEX INDEX" has always worked properly.
+     * Fix possible deadlock during concurrent "CREATE INDEX CONCURRENTLY"
+       operations (Tom Lane)
+     * Fix regexp_matches() handling of zero-length matches (Jeevan
+       Chalke)
+       Previously, zero-length matches like '^' could return too many
+       matches.
+     * Fix crash for overly-complex regular expressions (Heikki
+       Linnakangas)
+     * Fix regular expression match failures for back references combined
+       with non-greedy quantifiers (Jeevan Chalke)
+     * Prevent "CREATE FUNCTION" from checking "SET" variables unless
+       function body checking is enabled (Tom Lane)
+     * Allow "ALTER DEFAULT PRIVILEGES" to operate on schemas without
+       requiring CREATE permission (Tom Lane)
+     * Loosen restriction on keywords used in queries (Tom Lane)
+       Specifically, lessen keyword restrictions for role names, language
+       names, "EXPLAIN" and "COPY" options, and "SET" values. This allows
+       COPY ... (FORMAT BINARY) previously BINARY required single-quotes.
+     * Fix pgp_pub_decrypt() so it works for secret keys with passwords
+       (Marko Kreen)
+     * Have pg_upgrade use ">pg_dump --quote-all-identifiers" to avoid
+       problems with keyword changes between releases (Tom Lane)
+     * Remove rare inaccurate warning during vacuum of index-less tables
+       (Heikki Linnakangas)
+     * Improve analyze statistics generation after a cancelled file
+       truncate request (Kevin Grittner)
+     * Avoid possible failure when performing transaction control commands
+       (e.g "ROLLBACK") in prepared queries (Tom Lane)
+     * Allow various spellings of infinity on all platforms (Tom Lane)
+       Supported infinity values are "inf", "+inf", "-inf", "infinity",
+       "+infinity", and "-infinity".
+     * Expand ability to compare rows to records and arrays (Rafal
+       Rzepecki, Tom Lane)
+     * Update time zone data files to tzdata release 2013d for DST law
+       changes in DST law changes in Israel, Morocco, Palestine, Paraguay.
+       Also, historical zone data corrections for Macquarie Island (Tom
+       Lane)
      __________________________________________________________________
 
                                 Release 9.1.9
@@ -3961,6 +4884,90 @@ Documentation
        non-ASCII letters in contributor names. These are now
        transliterated so that they are reasonably legible without
        assumptions about character set.
+     __________________________________________________________________
+
+                               Release 9.0.14
+
+     Release Date: 2013-10-10
+
+   This release contains a variety of fixes from 9.0.13. For information
+   about new features in the 9.0 major release, see the Section called
+   Release 9.0.
+     __________________________________________________________________
+
+Migration to Version 9.0.14
+
+   A dump/restore is not required for those running 9.0.X.
+
+   Also, if you are upgrading from a version earlier than 9.0.6, see the
+   release notes for 9.0.6.
+     __________________________________________________________________
+
+Changes
+
+     * Prevent downcasing of non-ASCII non-double-quoted identifiers in
+       multi-byte encodings (Andrew Dunstan)
+       The previous behavior was wrong and confusing.
+     * Fix checkpoint memory leak in background writer when wal_level =
+       hot_standby (Naoya Anzai)
+     * Fix memory leak caused by lo_open() failure (Heikki Linnakangas)
+     * Fix memory overcommit bug when work_mem is using more than 24GB of
+       memory (Stephen Frost)
+     * Fix libpq SSL deadlock bug (Stephen Frost)
+     * Fix possible SSL network stack corruption in threaded libpq
+       applications (Nick Phillips, Stephen Frost)
+     * Properly compute row estimates for boolean columns containing many
+       NULL values (Andrew Gierth)
+       Previously tests like col IS NOT TRUE and col IS NOT FALSE did not
+       properly factor in NULL values when estimating plan costs.
+     * Prevent pushing down WHERE clauses into unsafe UNION/INTERSECT
+       subqueries (Tom Lane)
+       Previously such push downs could generate errors.
+     * Fix rare GROUP BY query error caused by improperly processed date
+       type modifiers (Tom Lane)
+     * Allow view dump code to better handle dropped columns on base
+       tables (Tom Lane)
+     * Properly record index comments created using UNIQUE and PRIMARY KEY
+       syntax (Andres Freund)
+       This fixes a parallel pg_restore failure.
+     * Fix "REINDEX TABLE" and "REINDEX DATABASE" to properly revalidate
+       constraints and mark invalidated indexes as valid (Noah Misch)
+       "REINDEX INDEX" has always worked properly.
+     * Fix possible deadlock during concurrent "CREATE INDEX CONCURRENTLY"
+       operations (Tom Lane)
+     * Fix regexp_matches() handling of zero-length matches (Jeevan
+       Chalke)
+       Previously, zero-length matches like '^' could return too many
+       matches.
+     * Fix crash for overly-complex regular expressions (Heikki
+       Linnakangas)
+     * Fix regular expression match failures for back references combined
+       with non-greedy quantifiers (Jeevan Chalke)
+     * Prevent "CREATE FUNCTION" from checking "SET" variables unless
+       function body checking is enabled (Tom Lane)
+     * Allow "ALTER DEFAULT PRIVILEGES" to operate on schemas without
+       requiring CREATE permission (Tom Lane)
+     * Loosen restriction on keywords used in queries (Tom Lane)
+       Specifically, lessen keyword restrictions for role names, language
+       names, "EXPLAIN" and "COPY" options, and "SET" values. This allows
+       COPY ... (FORMAT BINARY) previously BINARY required single-quotes.
+     * Fix pgp_pub_decrypt() so it works for secret keys with passwords
+       (Marko Kreen)
+     * Remove rare inaccurate warning during vacuum of index-less tables
+       (Heikki Linnakangas)
+     * Improve analyze statistics generation after a cancelled file
+       truncate request (Kevin Grittner)
+     * Avoid possible failure when performing transaction control commands
+       (e.g ROLLBACK) in prepared queries (Tom Lane)
+     * Allow various spellings of infinity on all platforms (Tom Lane)
+       Supported infinity values are "inf", "+inf", "-inf", "infinity",
+       "+infinity", and "-infinity".
+     * Expand ability to compare rows to records and arrays (Rafal
+       Rzepecki, Tom Lane)
+     * Update time zone data files to tzdata release 2013d for DST law
+       changes in DST law changes in Israel, Morocco, Palestine, Paraguay.
+       Also, historical zone data corrections for Macquarie Island (Tom
+       Lane)
      __________________________________________________________________
 
                                Release 9.0.13
@@ -6806,6 +7813,72 @@ Contrib
        Takahiro)
      * Update "contrib/start-scripts/linux" to use "/proc/self/oom_adj" to
        disable the Linux out-of-memory (OOM) killer (Alex Hunsaker, Tom
+       Lane)
+     __________________________________________________________________
+
+                               Release 8.4.18
+
+     Release Date: 2013-10-10
+
+   This release contains a variety of fixes from 8.4.17. For information
+   about new features in the 8.4 major release, see the Section called
+   Release 8.4.
+     __________________________________________________________________
+
+Migration to Version 8.4.18
+
+   A dump/restore is not required for those running 8.4.X.
+
+   Also, if you are upgrading from a version earlier than 8.4.10, see the
+   release notes for 8.4.10.
+     __________________________________________________________________
+
+Changes
+
+     * Prevent downcasing of non-ASCII non-double-quoted identifiers in
+       multi-byte encodings (Andrew Dunstan)
+       The previous behavior was wrong and confusing.
+     * Fix memory leak caused by lo_open() failure (Heikki Linnakangas)
+     * Fix memory overcommit bug when work_mem is using more than 24GB of
+       memory (Stephen Frost)
+     * Fix libpq SSL deadlock bug (Stephen Frost)
+     * Properly compute row estimates for boolean columns containing many
+       NULL values (Andrew Gierth)
+       Previously tests like col IS NOT TRUE and col IS NOT FALSE did not
+       properly factor in NULL values when estimating plan costs.
+     * Prevent pushing down WHERE clauses into unsafe UNION/INTERSECT
+       subqueries (Tom Lane)
+       Previously such push downs could generate errors.
+     * Fix rare GROUP BY query error caused by improperly processed date
+       type modifiers (Tom Lane)
+     * Allow view dump code to better handle dropped columns on base
+       tables (Tom Lane)
+     * Fix possible deadlock during concurrent "CREATE INDEX CONCURRENTLY"
+       operations (Tom Lane)
+     * Fix regexp_matches() handling of zero-length matches (Jeevan
+       Chalke)
+       Previously, zero-length matches like '^' could return too many
+       matches.
+     * Fix crash for overly-complex regular expressions (Heikki
+       Linnakangas)
+     * Fix regular expression match failures for back references combined
+       with non-greedy quantifiers (Jeevan Chalke)
+     * Prevent "CREATE FUNCTION" from checking "SET" variables unless
+       function body checking is enabled (Tom Lane)
+     * Fix pgp_pub_decrypt() so it works for secret keys with passwords
+       (Marko Kreen)
+     * Remove rare inaccurate warning during vacuum of index-less tables
+       (Heikki Linnakangas)
+     * Avoid possible failure when performing transaction control commands
+       (e.g "ROLLBACK") in prepared queries (Tom Lane)
+     * Allow various spellings of infinity on all platforms (Tom Lane)
+       Supported infinity values are "inf", "+inf", "-inf", "infinity",
+       "+infinity", and "-infinity".
+     * Expand ability to compare rows to records and arrays (Rafal
+       Rzepecki, Tom Lane)
+     * Update time zone data files to tzdata release 2013d for DST law
+       changes in DST law changes in Israel, Morocco, Palestine, Paraguay.
+       Also, historical zone data corrections for Macquarie Island (Tom
        Lane)
      __________________________________________________________________
 

@@ -3,7 +3,7 @@
  * lock.c
  *	  POSTGRES primary lock mechanism
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -38,12 +38,13 @@
 #include "miscadmin.h"
 #include "pg_trace.h"
 #include "pgstat.h"
+#include "storage/proc.h"
 #include "storage/sinvaladt.h"
 #include "storage/spin.h"
 #include "storage/standby.h"
 #include "utils/memutils.h"
 #include "utils/ps_status.h"
-#include "utils/resowner.h"
+#include "utils/resowner_private.h"
 
 
 /* This configuration variable is used to set the lock table size */
@@ -344,6 +345,7 @@ static void BeginStrongLockAcquire(LOCALLOCK *locallock, uint32 fasthashcode);
 static void FinishStrongLockAcquire(void);
 static void WaitOnLock(LOCALLOCK *locallock, ResourceOwner owner);
 static void ReleaseLockIfHeld(LOCALLOCK *locallock, bool sessionLock);
+static void LockReassignOwner(LOCALLOCK *locallock, ResourceOwner parent);
 static bool UnGrantLock(LOCK *lock, LOCKMODE lockmode,
 			PROCLOCK *proclock, LockMethod lockMethodTable);
 static void CleanUpLock(LOCK *lock, PROCLOCK *proclock,
@@ -537,6 +539,20 @@ ProcLockHashCode(const PROCLOCKTAG *proclocktag, uint32 hashcode)
 }
 
 /*
+ * Given two lock modes, return whether they would conflict.
+ */
+bool
+DoLockModesConflict(LOCKMODE mode1, LOCKMODE mode2)
+{
+	LockMethod	lockMethodTable = LockMethods[DEFAULT_LOCKMETHOD];
+
+	if (lockMethodTable->conflictTab[mode1] & LOCKBIT_ON(mode2))
+		return true;
+
+	return false;
+}
+
+/*
  * LockHasWaiters -- look up 'locktag' and check if releasing this
  *		lock would wake up other processes waiting for it.
  */
@@ -627,7 +643,6 @@ LockHasWaiters(const LOCKTAG *locktag, LOCKMODE lockmode, bool sessionLock)
 
 	return hasWaiters;
 }
-
 
 /*
  * LockAcquire -- Check for lock conflicts, sleep if conflict found,
@@ -1195,8 +1210,16 @@ SetupLockInTable(LockMethod lockMethodTable, PGPROC *proc,
 static void
 RemoveLocalLock(LOCALLOCK *locallock)
 {
+	int			i;
+
+	for (i = locallock->numLockOwners - 1; i >= 0; i--)
+	{
+		if (locallock->lockOwners[i].owner != NULL)
+			ResourceOwnerForgetLock(locallock->lockOwners[i].owner, locallock);
+	}
 	pfree(locallock->lockOwners);
 	locallock->lockOwners = NULL;
+
 	if (locallock->holdsStrongLockCount)
 	{
 		uint32		fasthashcode;
@@ -1209,6 +1232,7 @@ RemoveLocalLock(LOCALLOCK *locallock)
 		locallock->holdsStrongLockCount = FALSE;
 		SpinLockRelease(&FastPathStrongRelationLocks->mutex);
 	}
+
 	if (!hash_search(LockMethodLocalHash,
 					 (void *) &(locallock->tag),
 					 HASH_REMOVE, NULL))
@@ -1452,6 +1476,8 @@ GrantLockLocal(LOCALLOCK *locallock, ResourceOwner owner)
 	lockOwners[i].owner = owner;
 	lockOwners[i].nLocks = 1;
 	locallock->numLockOwners++;
+	if (owner != NULL)
+		ResourceOwnerRememberLock(owner, locallock);
 }
 
 /*
@@ -1767,6 +1793,8 @@ LockRelease(const LOCKTAG *locktag, LOCKMODE lockmode, bool sessionLock)
 				Assert(lockOwners[i].nLocks > 0);
 				if (--lockOwners[i].nLocks == 0)
 				{
+					if (owner != NULL)
+						ResourceOwnerForgetLock(owner, locallock);
 					/* compact out unused slot */
 					locallock->numLockOwners--;
 					if (i < locallock->numLockOwners)
@@ -1959,14 +1987,13 @@ LockReleaseAll(LOCKMETHODID lockmethodid, bool allLocks)
 		{
 			LOCALLOCKOWNER *lockOwners = locallock->lockOwners;
 
-			/* If it's above array position 0, move it down to 0 */
-			for (i = locallock->numLockOwners - 1; i > 0; i--)
+			/* If session lock is above array position 0, move it down to 0 */
+			for (i = 0; i < locallock->numLockOwners; i++)
 			{
 				if (lockOwners[i].owner == NULL)
-				{
 					lockOwners[0] = lockOwners[i];
-					break;
-				}
+				else
+					ResourceOwnerForgetLock(lockOwners[i].owner, locallock);
 			}
 
 			if (locallock->numLockOwners > 0 &&
@@ -1979,6 +2006,8 @@ LockReleaseAll(LOCKMETHODID lockmethodid, bool allLocks)
 				/* We aren't deleting this locallock, so done */
 				continue;
 			}
+			else
+				locallock->numLockOwners = 0;
 		}
 
 		/*
@@ -2164,18 +2193,31 @@ LockReleaseSession(LOCKMETHODID lockmethodid)
 /*
  * LockReleaseCurrentOwner
  *		Release all locks belonging to CurrentResourceOwner
+ *
+ * If the caller knows what those locks are, it can pass them as an array.
+ * That speeds up the call significantly, when a lot of locks are held.
+ * Otherwise, pass NULL for locallocks, and we'll traverse through our hash
+ * table to find them.
  */
 void
-LockReleaseCurrentOwner(void)
+LockReleaseCurrentOwner(LOCALLOCK **locallocks, int nlocks)
 {
-	HASH_SEQ_STATUS status;
-	LOCALLOCK  *locallock;
-
-	hash_seq_init(&status, LockMethodLocalHash);
-
-	while ((locallock = (LOCALLOCK *) hash_seq_search(&status)) != NULL)
+	if (locallocks == NULL)
 	{
-		ReleaseLockIfHeld(locallock, false);
+		HASH_SEQ_STATUS status;
+		LOCALLOCK  *locallock;
+
+		hash_seq_init(&status, LockMethodLocalHash);
+
+		while ((locallock = (LOCALLOCK *) hash_seq_search(&status)) != NULL)
+			ReleaseLockIfHeld(locallock, false);
+	}
+	else
+	{
+		int			i;
+
+		for (i = nlocks - 1; i >= 0; i--)
+			ReleaseLockIfHeld(locallocks[i], false);
 	}
 }
 
@@ -2221,6 +2263,8 @@ ReleaseLockIfHeld(LOCALLOCK *locallock, bool sessionLock)
 				locallock->nLocks -= lockOwners[i].nLocks;
 				/* compact out unused slot */
 				locallock->numLockOwners--;
+				if (owner != NULL)
+					ResourceOwnerForgetLock(owner, locallock);
 				if (i < locallock->numLockOwners)
 					lockOwners[i] = lockOwners[locallock->numLockOwners];
 			}
@@ -2243,57 +2287,83 @@ ReleaseLockIfHeld(LOCALLOCK *locallock, bool sessionLock)
 /*
  * LockReassignCurrentOwner
  *		Reassign all locks belonging to CurrentResourceOwner to belong
- *		to its parent resource owner
+ *		to its parent resource owner.
+ *
+ * If the caller knows what those locks are, it can pass them as an array.
+ * That speeds up the call significantly, when a lot of locks are held
+ * (e.g pg_dump with a large schema).  Otherwise, pass NULL for locallocks,
+ * and we'll traverse through our hash table to find them.
  */
 void
-LockReassignCurrentOwner(void)
+LockReassignCurrentOwner(LOCALLOCK **locallocks, int nlocks)
 {
 	ResourceOwner parent = ResourceOwnerGetParent(CurrentResourceOwner);
-	HASH_SEQ_STATUS status;
-	LOCALLOCK  *locallock;
-	LOCALLOCKOWNER *lockOwners;
 
 	Assert(parent != NULL);
 
-	hash_seq_init(&status, LockMethodLocalHash);
+	if (locallocks == NULL)
+	{
+		HASH_SEQ_STATUS status;
+		LOCALLOCK  *locallock;
 
-	while ((locallock = (LOCALLOCK *) hash_seq_search(&status)) != NULL)
+		hash_seq_init(&status, LockMethodLocalHash);
+
+		while ((locallock = (LOCALLOCK *) hash_seq_search(&status)) != NULL)
+			LockReassignOwner(locallock, parent);
+	}
+	else
 	{
 		int			i;
-		int			ic = -1;
-		int			ip = -1;
 
-		/*
-		 * Scan to see if there are any locks belonging to current owner or
-		 * its parent
-		 */
-		lockOwners = locallock->lockOwners;
-		for (i = locallock->numLockOwners - 1; i >= 0; i--)
-		{
-			if (lockOwners[i].owner == CurrentResourceOwner)
-				ic = i;
-			else if (lockOwners[i].owner == parent)
-				ip = i;
-		}
-
-		if (ic < 0)
-			continue;			/* no current locks */
-
-		if (ip < 0)
-		{
-			/* Parent has no slot, so just give it child's slot */
-			lockOwners[ic].owner = parent;
-		}
-		else
-		{
-			/* Merge child's count with parent's */
-			lockOwners[ip].nLocks += lockOwners[ic].nLocks;
-			/* compact out unused slot */
-			locallock->numLockOwners--;
-			if (ic < locallock->numLockOwners)
-				lockOwners[ic] = lockOwners[locallock->numLockOwners];
-		}
+		for (i = nlocks - 1; i >= 0; i--)
+			LockReassignOwner(locallocks[i], parent);
 	}
+}
+
+/*
+ * Subroutine of LockReassignCurrentOwner. Reassigns a given lock belonging to
+ * CurrentResourceOwner to its parent.
+ */
+static void
+LockReassignOwner(LOCALLOCK *locallock, ResourceOwner parent)
+{
+	LOCALLOCKOWNER *lockOwners;
+	int			i;
+	int			ic = -1;
+	int			ip = -1;
+
+	/*
+	 * Scan to see if there are any locks belonging to current owner or its
+	 * parent
+	 */
+	lockOwners = locallock->lockOwners;
+	for (i = locallock->numLockOwners - 1; i >= 0; i--)
+	{
+		if (lockOwners[i].owner == CurrentResourceOwner)
+			ic = i;
+		else if (lockOwners[i].owner == parent)
+			ip = i;
+	}
+
+	if (ic < 0)
+		return;					/* no current locks */
+
+	if (ip < 0)
+	{
+		/* Parent has no slot, so just give it the child's slot */
+		lockOwners[ic].owner = parent;
+		ResourceOwnerRememberLock(parent, locallock);
+	}
+	else
+	{
+		/* Merge child's count with parent's */
+		lockOwners[ip].nLocks += lockOwners[ic].nLocks;
+		/* compact out unused slot */
+		locallock->numLockOwners--;
+		if (ic < locallock->numLockOwners)
+			lockOwners[ic] = lockOwners[locallock->numLockOwners];
+	}
+	ResourceOwnerForgetLock(CurrentResourceOwner, locallock);
 }
 
 /*
@@ -2620,9 +2690,9 @@ GetLockConflicts(const LOCKTAG *locktag, LOCKMODE lockmode)
 			LWLockAcquire(proc->backendLock, LW_SHARED);
 
 			/*
-			 * If the target backend isn't referencing the same database as the
-			 * lock, then we needn't examine the individual relation IDs at
-			 * all; none of them can be relevant.
+			 * If the target backend isn't referencing the same database as
+			 * the lock, then we needn't examine the individual relation IDs
+			 * at all; none of them can be relevant.
 			 *
 			 * See FastPathTransferLocks() for discussion of why we do this
 			 * test after acquiring the lock.
@@ -2971,7 +3041,6 @@ PostPrepare_Locks(TransactionId xid)
 	LOCK	   *lock;
 	PROCLOCK   *proclock;
 	PROCLOCKTAG proclocktag;
-	bool		found;
 	int			partition;
 
 	/* This is a critical section: any error means big trouble */
@@ -3057,10 +3126,8 @@ PostPrepare_Locks(TransactionId xid)
 		while (proclock)
 		{
 			PROCLOCK   *nextplock;
-			LOCKMASK	holdMask;
-			PROCLOCK   *newproclock;
 
-			/* Get link first, since we may unlink/delete this proclock */
+			/* Get link first, since we may unlink/relink this proclock */
 			nextplock = (PROCLOCK *)
 				SHMQueueNext(procLocks, &proclock->procLink,
 							 offsetof(PROCLOCK, procLink));
@@ -3088,64 +3155,42 @@ PostPrepare_Locks(TransactionId xid)
 			if (proclock->releaseMask != proclock->holdMask)
 				elog(PANIC, "we seem to have dropped a bit somewhere");
 
-			holdMask = proclock->holdMask;
-
 			/*
 			 * We cannot simply modify proclock->tag.myProc to reassign
 			 * ownership of the lock, because that's part of the hash key and
-			 * the proclock would then be in the wrong hash chain.	So, unlink
-			 * and delete the old proclock; create a new one with the right
-			 * contents; and link it into place.  We do it in this order to be
-			 * certain we won't run out of shared memory (the way dynahash.c
-			 * works, the deleted object is certain to be available for
-			 * reallocation).
+			 * the proclock would then be in the wrong hash chain.	Instead
+			 * use hash_update_hash_key.  (We used to create a new hash entry,
+			 * but that risks out-of-memory failure if other processes are
+			 * busy making proclocks too.)	We must unlink the proclock from
+			 * our procLink chain and put it into the new proc's chain, too.
+			 *
+			 * Note: the updated proclock hash key will still belong to the
+			 * same hash partition, cf proclock_hash().  So the partition lock
+			 * we already hold is sufficient for this.
 			 */
-			SHMQueueDelete(&proclock->lockLink);
 			SHMQueueDelete(&proclock->procLink);
-			if (!hash_search(LockMethodProcLockHash,
-							 (void *) &(proclock->tag),
-							 HASH_REMOVE, NULL))
-				elog(PANIC, "proclock table corrupted");
 
 			/*
-			 * Create the hash key for the new proclock table.
+			 * Create the new hash key for the proclock.
 			 */
 			proclocktag.myLock = lock;
 			proclocktag.myProc = newproc;
 
-			newproclock = (PROCLOCK *) hash_search(LockMethodProcLockHash,
-												   (void *) &proclocktag,
-												   HASH_ENTER_NULL, &found);
-			if (!newproclock)
-				ereport(PANIC,	/* should not happen */
-						(errcode(ERRCODE_OUT_OF_MEMORY),
-						 errmsg("out of shared memory"),
-						 errdetail("Not enough memory for reassigning the prepared transaction's locks.")));
-
 			/*
-			 * If new, initialize the new entry
+			 * Update the proclock.  We should not find any existing entry for
+			 * the same hash key, since there can be only one entry for any
+			 * given lock with my own proc.
 			 */
-			if (!found)
-			{
-				newproclock->holdMask = 0;
-				newproclock->releaseMask = 0;
-				/* Add new proclock to appropriate lists */
-				SHMQueueInsertBefore(&lock->procLocks, &newproclock->lockLink);
-				SHMQueueInsertBefore(&(newproc->myProcLocks[partition]),
-									 &newproclock->procLink);
-				PROCLOCK_PRINT("PostPrepare_Locks: new", newproclock);
-			}
-			else
-			{
-				PROCLOCK_PRINT("PostPrepare_Locks: found", newproclock);
-				Assert((newproclock->holdMask & ~lock->grantMask) == 0);
-			}
+			if (!hash_update_hash_key(LockMethodProcLockHash,
+									  (void *) proclock,
+									  (void *) &proclocktag))
+				elog(PANIC, "duplicate entry found while reassigning a prepared transaction's locks");
 
-			/*
-			 * Pass over the identified lock ownership.
-			 */
-			Assert((newproclock->holdMask & holdMask) == 0);
-			newproclock->holdMask |= holdMask;
+			/* Re-link into the new proc's proclock list */
+			SHMQueueInsertBefore(&(newproc->myProcLocks[partition]),
+								 &proclock->procLink);
+
+			PROCLOCK_PRINT("PostPrepare_Locks: updated", proclock);
 
 	next_item:
 			proclock = nextplock;
@@ -3353,18 +3398,26 @@ GetLockStatusData(void)
 }
 
 /*
- * Returns a list of currently held AccessExclusiveLocks, for use
- * by GetRunningTransactionData().
+ * Returns a list of currently held AccessExclusiveLocks, for use by
+ * LogStandbySnapshot().  The result is a palloc'd array,
+ * with the number of elements returned into *nlocks.
+ *
+ * XXX This currently takes a lock on all partitions of the lock table,
+ * but it's possible to do better.  By reference counting locks and storing
+ * the value in the ProcArray entry for each backend we could tell if any
+ * locks need recording without having to acquire the partition locks and
+ * scan the lock table.  Whether that's worth the additional overhead
+ * is pretty dubious though.
  */
 xl_standby_lock *
 GetRunningTransactionLocks(int *nlocks)
 {
+	xl_standby_lock *accessExclusiveLocks;
 	PROCLOCK   *proclock;
 	HASH_SEQ_STATUS seqstat;
 	int			i;
 	int			index;
 	int			els;
-	xl_standby_lock *accessExclusiveLocks;
 
 	/*
 	 * Acquire lock on the entire shared lock data structure.
@@ -3421,6 +3474,8 @@ GetRunningTransactionLocks(int *nlocks)
 			index++;
 		}
 	}
+
+	Assert(index <= els);
 
 	/*
 	 * And release locks.  We do this in reverse order for two reasons: (1)
@@ -3727,7 +3782,7 @@ lock_twophase_recover(TransactionId xid, uint16 info,
 
 /*
  * Re-acquire a lock belonging to a transaction that was prepared, when
- * when starting up into hot standby mode.
+ * starting up into hot standby mode.
  */
 void
 lock_twophase_standby_recover(TransactionId xid, uint16 info,

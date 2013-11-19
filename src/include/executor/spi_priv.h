@@ -3,7 +3,7 @@
  * spi_priv.h
  *				Server Programming Interface private declarations
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/executor/spi_priv.h
@@ -23,8 +23,10 @@ typedef struct
 	/* current results */
 	uint32		processed;		/* by Executor */
 	Oid			lastoid;
-	SPITupleTable *tuptable;
+	SPITupleTable *tuptable;	/* tuptable currently being built */
 
+	/* resources of this execution context */
+	slist_head	tuptables;		/* list of all live SPITupleTables */
 	MemoryContext procCxt;		/* procedure context */
 	MemoryContext execCxt;		/* executor context */
 	MemoryContext savedcxt;		/* context of SPI_connect's caller */

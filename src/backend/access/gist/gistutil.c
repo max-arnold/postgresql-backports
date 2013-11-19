@@ -4,7 +4,7 @@
  *	  utilities routines for the postgres GiST index access method.
  *
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -374,6 +374,7 @@ gistchoose(Relation r, Page p, IndexTuple it,	/* it has compressed entry */
 	GISTENTRY	entry,
 				identry[INDEX_MAX_KEYS];
 	bool		isnull[INDEX_MAX_KEYS];
+	int			keep_current_best;
 
 	Assert(!GistPageIsLeaf(p));
 
@@ -395,6 +396,31 @@ gistchoose(Relation r, Page p, IndexTuple it,	/* it has compressed entry */
 	 * right of the first -1 are undefined.
 	 */
 	best_penalty[0] = -1;
+
+	/*
+	 * If we find a tuple that's exactly as good as the currently best one, we
+	 * could use either one.  When inserting a lot of tuples with the same or
+	 * similar keys, it's preferable to descend down the same path when
+	 * possible, as that's more cache-friendly.  On the other hand, if all
+	 * inserts land on the same leaf page after a split, we're never going to
+	 * insert anything to the other half of the split, and will end up using
+	 * only 50% of the available space.  Distributing the inserts evenly would
+	 * lead to better space usage, but that hurts cache-locality during
+	 * insertion.  To get the best of both worlds, when we find a tuple that's
+	 * exactly as good as the previous best, choose randomly whether to stick
+	 * to the old best, or use the new one.  Once we decide to stick to the
+	 * old best, we keep sticking to it for any subsequent equally good tuples
+	 * we might find.  This favors tuples with low offsets, but still allows
+	 * some inserts to go to other equally-good subtrees.
+	 *
+	 * keep_current_best is -1 if we haven't yet had to make a random choice
+	 * whether to keep the current best tuple.	If we have done so, and
+	 * decided to keep it, keep_current_best is 1; if we've decided to
+	 * replace, keep_current_best is 0.  (This state will be reset to -1 as
+	 * soon as we've made the replacement, but sometimes we make the choice in
+	 * advance of actually finding a replacement best tuple.)
+	 */
+	keep_current_best = -1;
 
 	/*
 	 * Loop over tuples on page.
@@ -441,6 +467,9 @@ gistchoose(Relation r, Page p, IndexTuple it,	/* it has compressed entry */
 
 				if (j < r->rd_att->natts - 1)
 					best_penalty[j + 1] = -1;
+
+				/* we have new best, so reset keep-it decision */
+				keep_current_best = -1;
 			}
 			else if (best_penalty[j] == usize)
 			{
@@ -463,12 +492,41 @@ gistchoose(Relation r, Page p, IndexTuple it,	/* it has compressed entry */
 		}
 
 		/*
-		 * If we find a tuple with zero penalty for all columns, there's no
-		 * need to examine remaining tuples; just break out of the loop and
-		 * return it.
+		 * If we looped past the last column, and did not update "result",
+		 * then this tuple is exactly as good as the prior best tuple.
+		 */
+		if (j == r->rd_att->natts && result != i)
+		{
+			if (keep_current_best == -1)
+			{
+				/* we didn't make the random choice yet for this old best */
+				keep_current_best = (random() <= (MAX_RANDOM_VALUE / 2)) ? 1 : 0;
+			}
+			if (keep_current_best == 0)
+			{
+				/* we choose to use the new tuple */
+				result = i;
+				/* choose again if there are even more exactly-as-good ones */
+				keep_current_best = -1;
+			}
+		}
+
+		/*
+		 * If we find a tuple with zero penalty for all columns, and we've
+		 * decided we don't want to search for another tuple with equal
+		 * penalty, there's no need to examine remaining tuples; just break
+		 * out of the loop and return it.
 		 */
 		if (zero_penalty)
-			break;
+		{
+			if (keep_current_best == -1)
+			{
+				/* we didn't make the random choice yet for this old best */
+				keep_current_best = (random() <= (MAX_RANDOM_VALUE / 2)) ? 1 : 0;
+			}
+			if (keep_current_best == 1)
+				break;
+		}
 	}
 
 	return result;
@@ -740,22 +798,30 @@ gistoptions(PG_FUNCTION_ARGS)
 }
 
 /*
- * Temporary GiST indexes are not WAL-logged, but we need LSNs to detect
- * concurrent page splits anyway. GetXLogRecPtrForTemp() provides a fake
- * sequence of LSNs for that purpose. Each call generates an LSN that is
- * greater than any previous value returned by this function in the same
- * session.
+ * Temporary and unlogged GiST indexes are not WAL-logged, but we need LSNs
+ * to detect concurrent page splits anyway. This function provides a fake
+ * sequence of LSNs for that purpose.
  */
 XLogRecPtr
-GetXLogRecPtrForTemp(void)
+gistGetFakeLSN(Relation rel)
 {
-	static XLogRecPtr counter = {0, 1};
+	static XLogRecPtr counter = 1;
 
-	counter.xrecoff++;
-	if (counter.xrecoff == 0)
+	if (rel->rd_rel->relpersistence == RELPERSISTENCE_TEMP)
 	{
-		counter.xlogid++;
-		counter.xrecoff++;
+		/*
+		 * Temporary relations are only accessible in our session, so a simple
+		 * backend-local counter will do.
+		 */
+		return counter++;
 	}
-	return counter;
+	else
+	{
+		/*
+		 * Unlogged relations are accessible from other backends, and survive
+		 * (clean) restarts. GetFakeLSNForUnloggedRel() handles that for us.
+		 */
+		Assert(rel->rd_rel->relpersistence == RELPERSISTENCE_UNLOGGED);
+		return GetFakeLSNForUnloggedRel();
+	}
 }

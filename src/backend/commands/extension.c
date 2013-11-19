@@ -12,7 +12,7 @@
  * postgresql.conf and recovery.conf.  An extension also has an installation
  * script file, containing SQL commands to create the extension's objects.
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -27,6 +27,7 @@
 #include <limits.h>
 #include <unistd.h>
 
+#include "access/htup_details.h"
 #include "access/sysattr.h"
 #include "access/xact.h"
 #include "catalog/dependency.h"
@@ -45,6 +46,7 @@
 #include "funcapi.h"
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
+#include "storage/fd.h"
 #include "tcop/utility.h"
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
@@ -748,8 +750,8 @@ execute_sql_string(const char *sql, const char *filename)
 			{
 				ProcessUtility(stmt,
 							   sql,
+							   PROCESS_UTILITY_QUERY,
 							   NULL,
-							   false,	/* not top level */
 							   dest,
 							   NULL);
 			}
@@ -1172,7 +1174,7 @@ find_update_path(List *evi_list,
 /*
  * CREATE EXTENSION
  */
-void
+Oid
 CreateExtension(CreateExtensionStmt *stmt)
 {
 	DefElem    *d_schema = NULL;
@@ -1208,7 +1210,7 @@ CreateExtension(CreateExtensionStmt *stmt)
 					(errcode(ERRCODE_DUPLICATE_OBJECT),
 					 errmsg("extension \"%s\" already exists, skipping",
 							stmt->extname)));
-			return;
+			return InvalidOid;
 		}
 		else
 			ereport(ERROR,
@@ -1374,6 +1376,7 @@ CreateExtension(CreateExtensionStmt *stmt)
 			csstmt->schemaname = schemaName;
 			csstmt->authid = NULL;		/* will be created by current user */
 			csstmt->schemaElts = NIL;
+			csstmt->if_not_exists = false;
 			CreateSchemaCommand(csstmt, NULL);
 
 			/*
@@ -1391,12 +1394,16 @@ CreateExtension(CreateExtensionStmt *stmt)
 		 */
 		List	   *search_path = fetch_search_path(false);
 
-		if (search_path == NIL) /* probably can't happen */
-			elog(ERROR, "there is no default creation target");
+		if (search_path == NIL)	/* nothing valid in search_path? */
+			ereport(ERROR,
+					(errcode(ERRCODE_UNDEFINED_SCHEMA),
+					 errmsg("no schema has been selected to create in")));
 		schemaOid = linitial_oid(search_path);
 		schemaName = get_namespace_name(schemaOid);
 		if (schemaName == NULL) /* recently-deleted namespace? */
-			elog(ERROR, "there is no default creation target");
+			ereport(ERROR,
+					(errcode(ERRCODE_UNDEFINED_SCHEMA),
+					 errmsg("no schema has been selected to create in")));
 
 		list_free(search_path);
 	}
@@ -1467,6 +1474,8 @@ CreateExtension(CreateExtensionStmt *stmt)
 	 */
 	ApplyExtensionUpdates(extensionOid, pcontrol,
 						  versionName, updateVersions);
+
+	return extensionOid;
 }
 
 /*
@@ -1557,8 +1566,7 @@ InsertExtensionTuple(const char *extName, Oid extOwner,
 		recordDependencyOn(&myself, &otherext, DEPENDENCY_NORMAL);
 	}
 	/* Post creation hook for new extension */
-	InvokeObjectAccessHook(OAT_POST_CREATE,
-						   ExtensionRelationId, extensionOid, 0, NULL);
+	InvokeObjectPostCreateHook(ExtensionRelationId, extensionOid, 0);
 
 	return extensionOid;
 }
@@ -2395,7 +2403,7 @@ extension_config_remove(Oid extensionoid, Oid tableoid)
 /*
  * Execute ALTER EXTENSION SET SCHEMA
  */
-void
+Oid
 AlterExtensionNamespace(List *names, const char *newschema)
 {
 	char	   *extensionName;
@@ -2476,7 +2484,7 @@ AlterExtensionNamespace(List *names, const char *newschema)
 	if (extForm->extnamespace == nspOid)
 	{
 		heap_close(extRel, RowExclusiveLock);
-		return;
+		return InvalidOid;
 	}
 
 	/* Check extension is supposed to be relocatable */
@@ -2568,12 +2576,16 @@ AlterExtensionNamespace(List *names, const char *newschema)
 	/* update dependencies to point to the new schema */
 	changeDependencyFor(ExtensionRelationId, extensionOid,
 						NamespaceRelationId, oldNspOid, nspOid);
+
+	InvokeObjectPostAlterHook(ExtensionRelationId, extensionOid, 0);
+
+	return extensionOid;
 }
 
 /*
  * Execute ALTER EXTENSION UPDATE
  */
-void
+Oid
 ExecAlterExtensionStmt(AlterExtensionStmt *stmt)
 {
 	DefElem    *d_new_version = NULL;
@@ -2690,7 +2702,7 @@ ExecAlterExtensionStmt(AlterExtensionStmt *stmt)
 		ereport(NOTICE,
 		   (errmsg("version \"%s\" of extension \"%s\" is already installed",
 				   versionName, stmt->extname)));
-		return;
+		return InvalidOid;
 	}
 
 	/*
@@ -2706,6 +2718,8 @@ ExecAlterExtensionStmt(AlterExtensionStmt *stmt)
 	 */
 	ApplyExtensionUpdates(extensionOid, control,
 						  oldVersionName, updateVersions);
+
+	return extensionOid;
 }
 
 /*
@@ -2848,6 +2862,8 @@ ApplyExtensionUpdates(Oid extensionOid,
 			recordDependencyOn(&myself, &otherext, DEPENDENCY_NORMAL);
 		}
 
+		InvokeObjectPostAlterHook(ExtensionRelationId, extensionOid, 0);
+
 		/*
 		 * Finally, execute the update script file
 		 */
@@ -2868,7 +2884,7 @@ ApplyExtensionUpdates(Oid extensionOid,
 /*
  * Execute ALTER EXTENSION ADD/DROP
  */
-void
+Oid
 ExecAlterExtensionContentsStmt(AlterExtensionContentsStmt *stmt)
 {
 	ObjectAddress extension;
@@ -2961,6 +2977,8 @@ ExecAlterExtensionContentsStmt(AlterExtensionContentsStmt *stmt)
 			extension_config_remove(extension.objectId, object.objectId);
 	}
 
+	InvokeObjectPostAlterHook(ExtensionRelationId, extension.objectId, 0);
+
 	/*
 	 * If get_object_address() opened the relation for us, we close it to keep
 	 * the reference count correct - but we retain any locks acquired by
@@ -2969,96 +2987,6 @@ ExecAlterExtensionContentsStmt(AlterExtensionContentsStmt *stmt)
 	 */
 	if (relation != NULL)
 		relation_close(relation, NoLock);
-}
 
-/*
- * AlterExtensionOwner_internal
- *
- * Internal routine for changing the owner of an extension.  rel must be
- * pg_extension, already open and suitably locked; it will not be closed.
- *
- * Note that this only changes ownership of the extension itself; it doesn't
- * change the ownership of objects it contains.  Since this function is
- * currently only called from REASSIGN OWNED, this restriction is okay because
- * said objects would also be affected by our caller.  But it's not enough for
- * a full-fledged ALTER OWNER implementation, so beware.
- */
-static void
-AlterExtensionOwner_internal(Relation rel, Oid extensionOid, Oid newOwnerId)
-{
-	Form_pg_extension extForm;
-	HeapTuple	tup;
-	SysScanDesc scandesc;
-	ScanKeyData entry[1];
-
-	Assert(RelationGetRelid(rel) == ExtensionRelationId);
-
-	ScanKeyInit(&entry[0],
-				ObjectIdAttributeNumber,
-				BTEqualStrategyNumber, F_OIDEQ,
-				ObjectIdGetDatum(extensionOid));
-
-	scandesc = systable_beginscan(rel, ExtensionOidIndexId, true,
-								  SnapshotNow, 1, entry);
-
-	/* We assume that there can be at most one matching tuple */
-	tup = systable_getnext(scandesc);
-	if (!HeapTupleIsValid(tup)) /* should not happen */
-		elog(ERROR, "cache lookup failed for extension %u", extensionOid);
-
-	tup = heap_copytuple(tup);
-	systable_endscan(scandesc);
-
-	extForm = (Form_pg_extension) GETSTRUCT(tup);
-
-	/*
-	 * If the new owner is the same as the existing owner, consider the
-	 * command to have succeeded.  This is for dump restoration purposes.
-	 */
-	if (extForm->extowner != newOwnerId)
-	{
-		/* Superusers can always do it */
-		if (!superuser())
-		{
-			/* Otherwise, must be owner of the existing object */
-			if (!pg_extension_ownercheck(HeapTupleGetOid(tup), GetUserId()))
-				aclcheck_error(ACLCHECK_NOT_OWNER, ACL_KIND_EXTENSION,
-							   NameStr(extForm->extname));
-
-			/* Must be able to become new owner */
-			check_is_member_of_role(GetUserId(), newOwnerId);
-
-			/* no privilege checks on namespace are required */
-		}
-
-		/*
-		 * Modify the owner --- okay to scribble on tup because it's a copy
-		 */
-		extForm->extowner = newOwnerId;
-
-		simple_heap_update(rel, &tup->t_self, tup);
-
-		CatalogUpdateIndexes(rel, tup);
-
-		/* Update owner dependency reference */
-		changeDependencyOnOwner(ExtensionRelationId, extensionOid,
-								newOwnerId);
-	}
-
-	heap_freetuple(tup);
-}
-
-/*
- * Change extension owner, by OID
- */
-void
-AlterExtensionOwner_oid(Oid extensionOid, Oid newOwnerId)
-{
-	Relation	rel;
-
-	rel = heap_open(ExtensionRelationId, RowExclusiveLock);
-
-	AlterExtensionOwner_internal(rel, extensionOid, newOwnerId);
-
-	heap_close(rel, NoLock);
+	return extension.objectId;
 }

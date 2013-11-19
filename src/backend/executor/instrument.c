@@ -4,7 +4,7 @@
  *	 functions for instrumentation of plan execution
  *
  *
- * Copyright (c) 2001-2012, PostgreSQL Global Development Group
+ * Copyright (c) 2001-2013, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  src/backend/executor/instrument.c
@@ -56,7 +56,7 @@ InstrStartNode(Instrumentation *instr)
 		if (INSTR_TIME_IS_ZERO(instr->starttime))
 			INSTR_TIME_SET_CURRENT(instr->starttime);
 		else
-			elog(DEBUG2, "InstrStartNode called twice in a row");
+			elog(ERROR, "InstrStartNode called twice in a row");
 	}
 
 	/* save buffer usage totals at node entry, if needed */
@@ -77,10 +77,7 @@ InstrStopNode(Instrumentation *instr, double nTuples)
 	if (instr->need_timer)
 	{
 		if (INSTR_TIME_IS_ZERO(instr->starttime))
-		{
-			elog(DEBUG2, "InstrStopNode called without start");
-			return;
-		}
+			elog(ERROR, "InstrStopNode called without start");
 
 		INSTR_TIME_SET_CURRENT(endtime);
 		INSTR_TIME_ACCUM_DIFF(instr->counter, endtime, instr->starttime);
@@ -112,7 +109,7 @@ InstrEndLoop(Instrumentation *instr)
 		return;
 
 	if (!INSTR_TIME_IS_ZERO(instr->starttime))
-		elog(DEBUG2, "InstrEndLoop called on running node");
+		elog(ERROR, "InstrEndLoop called on running node");
 
 	/* Accumulate per-cycle statistics into totals */
 	totaltime = INSTR_TIME_GET_DOUBLE(instr->counter);
