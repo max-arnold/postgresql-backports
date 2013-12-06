@@ -17,6 +17,195 @@
    review, so each item is truly a community effort.
      __________________________________________________________________
 
+                                Release 9.3.2
+
+     Release Date: 2013-12-05
+
+   This release contains a variety of fixes from 9.3.1. For information
+   about new features in the 9.3 major release, see the Section called
+   Release 9.3.
+     __________________________________________________________________
+
+Migration to Version 9.3.2
+
+   A dump/restore is not required for those running 9.3.X.
+
+   However, this release corrects a number of potential data corruption
+   issues. See the first three changelog entries below to find out whether
+   your installation has been affected and what steps you can take if so.
+
+   Also, if you are upgrading from a version earlier than 9.3.1, see the
+   release notes for 9.3.1.
+     __________________________________________________________________
+
+Changes
+
+     * Fix "VACUUM"'s tests to see whether it can update relfrozenxid
+       (Andres Freund)
+       In some cases "VACUUM" (either manual or autovacuum) could
+       incorrectly advance a table's relfrozenxid value, allowing tuples
+       to escape freezing, causing those rows to become invisible once
+       2^31 transactions have elapsed. The probability of data loss is
+       fairly low since multiple incorrect advancements would need to
+       happen before actual loss occurs, but it's not zero. In 9.2.0 and
+       later, the probability of loss is higher, and it's also possible to
+       get "could not access status of transaction" errors as a
+       consequence of this bug. Users upgrading from releases 9.0.4 or
+       8.4.8 or earlier are not affected, but all later versions contain
+       the bug.
+       The issue can be ameliorated by, after upgrading, vacuuming all
+       tables in all databases while having vacuum_freeze_table_age set to
+       zero. This will fix any latent corruption but will not be able to
+       fix all pre-existing data errors. However, an installation can be
+       presumed safe after performing this vacuuming if it has executed
+       fewer than 2^31 update transactions in its lifetime (check this
+       with SELECT txid_current() < 2^31).
+     * Fix multiple bugs in MultiXactId freezing (Andres Freund, Alvaro
+       Herrera)
+       These bugs could lead to "could not access status of transaction"
+       errors, or to duplicate or vanishing rows. Users upgrading from
+       releases prior to 9.3.0 are not affected.
+       The issue can be ameliorated by, after upgrading, vacuuming all
+       tables in all databases while having vacuum_freeze_table_age set to
+       zero. This will fix latent corruption but will not be able to fix
+       all pre-existing data errors.
+       As a separate issue, these bugs can also cause standby servers to
+       get out of sync with the primary, thus exhibiting data errors that
+       are not in the primary. Therefore, it's recommended that 9.3.0 and
+       9.3.1 standby servers be re-cloned from the primary (e.g., with a
+       new base backup) after upgrading.
+     * Fix initialization of "pg_clog" and "pg_subtrans" during hot
+       standby startup (Andres Freund, Heikki Linnakangas)
+       This bug can cause data loss on standby servers at the moment they
+       start to accept hot-standby queries, by marking committed
+       transactions as uncommitted. The likelihood of such corruption is
+       small unless, at the time of standby startup, the primary server
+       has executed many updating transactions since its last checkpoint.
+       Symptoms include missing rows, rows that should have been deleted
+       being still visible, and obsolete versions of updated rows being
+       still visible alongside their newer versions.
+       This bug was introduced in versions 9.3.0, 9.2.5, 9.1.10, and
+       9.0.14. Standby servers that have only been running earlier
+       releases are not at risk. It's recommended that standby servers
+       that have ever run any of the buggy releases be re-cloned from the
+       primary (e.g., with a new base backup) after upgrading.
+     * Fix multiple bugs in update chain traversal (Andres Freund, Alvaro
+       Herrera)
+       These bugs could result in incorrect behavior, such as locking or
+       even updating the wrong row, in the presence of concurrent updates.
+       Spurious "unable to fetch updated version of tuple" errors were
+       also possible.
+     * Fix dangling-pointer problem in fast-path locking (Tom Lane)
+       This could lead to corruption of the lock data structures in shared
+       memory, causing "lock already held" and other odd errors.
+     * Fix assorted race conditions in timeout management (Tom Lane)
+       These errors could result in a server process becoming unresponsive
+       because it had blocked SIGALRM and/or SIGINT.
+     * Truncate "pg_multixact" contents during WAL replay (Andres Freund)
+       This avoids ever-increasing disk space consumption in standby
+       servers.
+     * Ensure an anti-wraparound "VACUUM" counts a page as scanned when
+       it's only verified that no tuples need freezing (Sergey Burladyan,
+       Jeff Janes)
+       This bug could result in failing to advance relfrozenxid, so that
+       the table would still be thought to need another anti-wraparound
+       vacuum. In the worst case the database might even shut down to
+       prevent wraparound.
+     * Fix full-table-vacuum request mechanism for MultiXactIds (Andres
+       Freund)
+       This bug could result in large amounts of useless autovacuum
+       activity.
+     * Fix race condition in GIN index posting tree page deletion (Heikki
+       Linnakangas)
+       This could lead to transient wrong answers or query failures.
+     * Fix "unexpected spgdoinsert() failure" error during SP-GiST index
+       creation (Teodor Sigaev)
+     * Fix assorted bugs in materialized views (Kevin Grittner, Andres
+       Freund)
+     * Re-allow duplicate table aliases if they're within aliased JOINs
+       (Tom Lane)
+       Historically PostgreSQL has accepted queries like
+SELECT ... FROM tab1 x CROSS JOIN (tab2 x CROSS JOIN tab3 y) z
+       although a strict reading of the SQL standard would forbid the
+       duplicate usage of table alias x. A misguided change in 9.3.0
+       caused it to reject some such cases that were formerly accepted.
+       Restore the previous behavior.
+     * Avoid flattening a subquery whose SELECT list contains a volatile
+       function wrapped inside a sub-SELECT (Tom Lane)
+       This avoids unexpected results due to extra evaluations of the
+       volatile function.
+     * Fix planner's processing of non-simple-variable subquery outputs
+       nested within outer joins (Tom Lane)
+       This error could lead to incorrect plans for queries involving
+       multiple levels of subqueries within JOIN syntax.
+     * Fix incorrect planning in cases where the same non-strict
+       expression appears in multiple WHERE and outer JOIN equality
+       clauses (Tom Lane)
+     * Fix planner crash with whole-row reference to a subquery (Tom Lane)
+     * Fix incorrect generation of optimized MIN()/MAX() plans for
+       inheritance trees (Tom Lane)
+       The planner could fail in cases where the MIN()/MAX() argument was
+       an expression rather than a simple variable.
+     * Fix premature deletion of temporary files (Andres Freund)
+     * Prevent intra-transaction memory leak when printing range values
+       (Tom Lane)
+       This fix actually cures transient memory leaks in any datatype
+       output function, but range types are the only ones known to have
+       had a significant problem.
+     * Fix memory leaks when reloading configuration files (Heikki
+       Linnakangas, Hari Babu)
+     * Prevent incorrect display of dropped columns in NOT NULL and CHECK
+       constraint violation messages (Michael Paquier and Tom Lane)
+     * Allow default arguments and named-argument notation for window
+       functions (Tom Lane)
+       Previously, these cases were likely to crash.
+     * Suppress trailing whitespace on each line when pretty-printing
+       rules and views (Tom Lane)
+       9.3.0 generated such whitespace in many more cases than previous
+       versions did. To reduce unexpected behavioral changes, suppress
+       unnecessary whitespace in all cases.
+     * Fix possible read past end of memory in rule printing (Peter
+       Eisentraut)
+     * Fix array slicing of int2vector and oidvector values (Tom Lane)
+       Expressions of this kind are now implicitly promoted to regular
+       int2 or oid arrays.
+     * Return a valid JSON value when converting an empty hstore value to
+       json (Oskari Saarenmaa)
+     * Fix incorrect behaviors when using a SQL-standard, simple GMT
+       offset timezone (Tom Lane)
+       In some cases, the system would use the simple GMT offset value
+       when it should have used the regular timezone setting that had
+       prevailed before the simple offset was selected. This change also
+       causes the timeofday function to honor the simple GMT offset zone.
+     * Prevent possible misbehavior when logging translations of Windows
+       error codes (Tom Lane)
+     * Properly quote generated command lines in pg_ctl (Naoya Anzai and
+       Tom Lane)
+       This fix applies only to Windows.
+     * Fix pg_dumpall to work when a source database sets
+       default_transaction_read_only via "ALTER DATABASE SET" (Kevin
+       Grittner)
+       Previously, the generated script would fail during restore.
+     * Fix pg_isready to handle its "-d" option properly (Fabrizio de
+       Royes Mello and Fujii Masao)
+     * Fix parsing of WAL file names in pg_receivexlog (Heikki
+       Linnakangas)
+       This error made pg_receivexlog unable to restart streaming after
+       stopping, once at least 4 GB of WAL had been written.
+     * Report out-of-disk-space failures properly in pg_upgrade (Peter
+       Eisentraut)
+     * Make ecpg search for quoted cursor names case-sensitively (Zoltan
+       Boszormenyi)
+     * Fix ecpg's processing of lists of variables declared varchar
+       (Zoltan Boszormenyi)
+     * Make "contrib/lo" defend against incorrect trigger definitions
+       (Marc Cousin)
+     * Update time zone data files to tzdata release 2013h for DST law
+       changes in Argentina, Brazil, Jordan, Libya, Liechtenstein,
+       Morocco, and Palestine. Also, new timezone abbreviations WIB, WIT,
+       WITA for Indonesia.
+     __________________________________________________________________
+
                                 Release 9.3.1
 
      Release Date: 2013-10-10
@@ -29,17 +218,25 @@
 Migration to Version 9.3.1
 
    A dump/restore is not required for those running 9.3.X.
+
+   However, if you use the hstore extension, see the first changelog
+   entry.
      __________________________________________________________________
 
 Changes
 
-     * Update hstore extension with JSON functionality (Andrew Dunstan)
-       Users who installed hstore prior to 9.3.1 must execute:
+     * Ensure new-in-9.3 JSON functionality is added to the hstore
+       extension during an update (Andrew Dunstan)
+       Users who upgraded a pre-9.3 database containing hstore should
+       execute
 ALTER EXTENSION hstore UPDATE;
-       to add two new JSON functions and a cast.
-     * Fix memory leak when creating range indexes (Heikki Linnakangas)
+       after installing 9.3.1, to add two new JSON functions and a cast.
+       (If hstore is already up to date, this command does nothing.)
+     * Fix memory leak when creating B-tree indexes on range columns
+       (Heikki Linnakangas)
+     * Fix memory leak caused by lo_open() failure (Heikki Linnakangas)
      * Serializable snapshot fixes (Kevin Grittner, Heikki Linnakangas)
-     * Fix libpq SSL deadlock bug (Stephen Frost)
+     * Fix deadlock bug in libpq when using SSL (Stephen Frost)
      * Fix timeline handling bugs in pg_receivexlog (Heikki Linnakangas,
        Andrew Gierth)
      * Prevent "CREATE FUNCTION" from checking "SET" variables unless
@@ -720,6 +917,141 @@ Documentation
      * Improve commit_delay documentation (Peter Geoghegan)
      __________________________________________________________________
 
+                                Release 9.2.6
+
+     Release Date: 2013-12-05
+
+   This release contains a variety of fixes from 9.2.5. For information
+   about new features in the 9.2 major release, see the Section called
+   Release 9.2.
+     __________________________________________________________________
+
+Migration to Version 9.2.6
+
+   A dump/restore is not required for those running 9.2.X.
+
+   However, this release corrects a number of potential data corruption
+   issues. See the first two changelog entries below to find out whether
+   your installation has been affected and what steps you can take if so.
+
+   Also, if you are upgrading from a version earlier than 9.2.4, see the
+   release notes for 9.2.4.
+     __________________________________________________________________
+
+Changes
+
+     * Fix "VACUUM"'s tests to see whether it can update relfrozenxid
+       (Andres Freund)
+       In some cases "VACUUM" (either manual or autovacuum) could
+       incorrectly advance a table's relfrozenxid value, allowing tuples
+       to escape freezing, causing those rows to become invisible once
+       2^31 transactions have elapsed. The probability of data loss is
+       fairly low since multiple incorrect advancements would need to
+       happen before actual loss occurs, but it's not zero. In 9.2.0 and
+       later, the probability of loss is higher, and it's also possible to
+       get "could not access status of transaction" errors as a
+       consequence of this bug. Users upgrading from releases 9.0.4 or
+       8.4.8 or earlier are not affected, but all later versions contain
+       the bug.
+       The issue can be ameliorated by, after upgrading, vacuuming all
+       tables in all databases while having vacuum_freeze_table_age set to
+       zero. This will fix any latent corruption but will not be able to
+       fix all pre-existing data errors. However, an installation can be
+       presumed safe after performing this vacuuming if it has executed
+       fewer than 2^31 update transactions in its lifetime (check this
+       with SELECT txid_current() < 2^31).
+     * Fix initialization of "pg_clog" and "pg_subtrans" during hot
+       standby startup (Andres Freund, Heikki Linnakangas)
+       This bug can cause data loss on standby servers at the moment they
+       start to accept hot-standby queries, by marking committed
+       transactions as uncommitted. The likelihood of such corruption is
+       small unless, at the time of standby startup, the primary server
+       has executed many updating transactions since its last checkpoint.
+       Symptoms include missing rows, rows that should have been deleted
+       being still visible, and obsolete versions of updated rows being
+       still visible alongside their newer versions.
+       This bug was introduced in versions 9.3.0, 9.2.5, 9.1.10, and
+       9.0.14. Standby servers that have only been running earlier
+       releases are not at risk. It's recommended that standby servers
+       that have ever run any of the buggy releases be re-cloned from the
+       primary (e.g., with a new base backup) after upgrading.
+     * Fix dangling-pointer problem in fast-path locking (Tom Lane)
+       This could lead to corruption of the lock data structures in shared
+       memory, causing "lock already held" and other odd errors.
+     * Truncate "pg_multixact" contents during WAL replay (Andres Freund)
+       This avoids ever-increasing disk space consumption in standby
+       servers.
+     * Ensure an anti-wraparound "VACUUM" counts a page as scanned when
+       it's only verified that no tuples need freezing (Sergey Burladyan,
+       Jeff Janes)
+       This bug could result in failing to advance relfrozenxid, so that
+       the table would still be thought to need another anti-wraparound
+       vacuum. In the worst case the database might even shut down to
+       prevent wraparound.
+     * Fix race condition in GIN index posting tree page deletion (Heikki
+       Linnakangas)
+       This could lead to transient wrong answers or query failures.
+     * Fix "unexpected spgdoinsert() failure" error during SP-GiST index
+       creation (Teodor Sigaev)
+     * Avoid flattening a subquery whose SELECT list contains a volatile
+       function wrapped inside a sub-SELECT (Tom Lane)
+       This avoids unexpected results due to extra evaluations of the
+       volatile function.
+     * Fix planner's processing of non-simple-variable subquery outputs
+       nested within outer joins (Tom Lane)
+       This error could lead to incorrect plans for queries involving
+       multiple levels of subqueries within JOIN syntax.
+     * Fix incorrect planning in cases where the same non-strict
+       expression appears in multiple WHERE and outer JOIN equality
+       clauses (Tom Lane)
+     * Fix planner crash with whole-row reference to a subquery (Tom Lane)
+     * Fix incorrect generation of optimized MIN()/MAX() plans for
+       inheritance trees (Tom Lane)
+       The planner could fail in cases where the MIN()/MAX() argument was
+       an expression rather than a simple variable.
+     * Fix premature deletion of temporary files (Andres Freund)
+     * Prevent intra-transaction memory leak when printing range values
+       (Tom Lane)
+       This fix actually cures transient memory leaks in any datatype
+       output function, but range types are the only ones known to have
+       had a significant problem.
+     * Prevent incorrect display of dropped columns in NOT NULL and CHECK
+       constraint violation messages (Michael Paquier and Tom Lane)
+     * Allow default arguments and named-argument notation for window
+       functions (Tom Lane)
+       Previously, these cases were likely to crash.
+     * Fix possible read past end of memory in rule printing (Peter
+       Eisentraut)
+     * Fix array slicing of int2vector and oidvector values (Tom Lane)
+       Expressions of this kind are now implicitly promoted to regular
+       int2 or oid arrays.
+     * Fix incorrect behaviors when using a SQL-standard, simple GMT
+       offset timezone (Tom Lane)
+       In some cases, the system would use the simple GMT offset value
+       when it should have used the regular timezone setting that had
+       prevailed before the simple offset was selected. This change also
+       causes the timeofday function to honor the simple GMT offset zone.
+     * Prevent possible misbehavior when logging translations of Windows
+       error codes (Tom Lane)
+     * Properly quote generated command lines in pg_ctl (Naoya Anzai and
+       Tom Lane)
+       This fix applies only to Windows.
+     * Fix pg_dumpall to work when a source database sets
+       default_transaction_read_only via "ALTER DATABASE SET" (Kevin
+       Grittner)
+       Previously, the generated script would fail during restore.
+     * Make ecpg search for quoted cursor names case-sensitively (Zoltan
+       Boszormenyi)
+     * Fix ecpg's processing of lists of variables declared varchar
+       (Zoltan Boszormenyi)
+     * Make "contrib/lo" defend against incorrect trigger definitions
+       (Marc Cousin)
+     * Update time zone data files to tzdata release 2013h for DST law
+       changes in Argentina, Brazil, Jordan, Libya, Liechtenstein,
+       Morocco, and Palestine. Also, new timezone abbreviations WIB, WIT,
+       WITA for Indonesia.
+     __________________________________________________________________
+
                                 Release 9.2.5
 
      Release Date: 2013-10-10
@@ -733,25 +1065,27 @@ Migration to Version 9.2.5
 
    A dump/restore is not required for those running 9.2.X.
 
-   Also, if you are upgrading from a version earlier than 9.2.2, see the
-   release notes for 9.2.2.
+   However, if you are upgrading from a version earlier than 9.2.4, see
+   the release notes for 9.2.4.
      __________________________________________________________________
 
 Changes
 
-     * Prevent downcasing of non-ASCII non-double-quoted identifiers in
-       multi-byte encodings (Andrew Dunstan)
-       The previous behavior was wrong and confusing.
-     * Fix memory leak when creating range indexes (Heikki Linnakangas)
+     * Prevent corruption of multi-byte characters when attempting to
+       case-fold identifiers (Andrew Dunstan)
+       PostgreSQL case-folds non-ASCII characters only when using a
+       single-byte server encoding.
+     * Fix memory leak when creating B-tree indexes on range columns
+       (Heikki Linnakangas)
      * Fix checkpoint memory leak in background writer when wal_level =
        hot_standby (Naoya Anzai)
      * Fix memory leak caused by lo_open() failure (Heikki Linnakangas)
      * Fix memory overcommit bug when work_mem is using more than 24GB of
        memory (Stephen Frost)
      * Serializable snapshot fixes (Kevin Grittner, Heikki Linnakangas)
-     * Fix libpq SSL deadlock bug (Stephen Frost)
-     * Fix possible SSL network stack corruption in threaded libpq
-       applications (Nick Phillips, Stephen Frost)
+     * Fix deadlock bug in libpq when using SSL (Stephen Frost)
+     * Fix possible SSL state corruption in threaded libpq applications
+       (Nick Phillips, Stephen Frost)
      * Improve estimate of planner cost when choosing between generic and
        custom plans (Tom Lane)
        This change will favor generic plans when planning cost is high.
@@ -759,23 +1093,26 @@ Changes
        NULL values (Andrew Gierth)
        Previously tests like col IS NOT TRUE and col IS NOT FALSE did not
        properly factor in NULL values when estimating plan costs.
-     * Fix UNION ALL and inheritance queries to properly recheck
-       parameterized paths (Tom Lane)
-       This fixes cases where suboptimal query plans could potentially be
-       chosen.
+     * Fix accounting for qualifier evaluation costs in UNION ALL and
+       inheritance queries (Tom Lane)
+       This fixes cases where suboptimal query plans could be chosen if
+       some WHERE clauses are expensive to calculate.
      * Prevent pushing down WHERE clauses into unsafe UNION/INTERSECT
        subqueries (Tom Lane)
-       Previously such push downs could generate errors.
-     * Fix rare GROUP BY query error caused by improperly processed date
-       type modifiers (Tom Lane)
+       Subqueries of a UNION or INTERSECT that contain set-returning
+       functions or volatile functions in their SELECT lists could be
+       improperly optimized, leading to run-time errors or incorrect query
+       results.
+     * Fix rare case of "failed to locate grouping columns" planner
+       failure (Tom Lane)
      * Fix pg_dump of foreign tables with dropped columns (Andrew Dunstan)
        Previously such cases could cause a pg_upgrade error.
      * Reorder pg_dump processing of extension-related rules and event
        triggers (Joe Conway)
      * Force dumping of extension tables if specified by "pg_dump -t" or
        -n (Joe Conway)
-     * Allow view dump code to better handle dropped columns on base
-       tables (Tom Lane)
+     * Improve view dumping code's handling of dropped columns in
+       referenced tables (Tom Lane)
      * Fix "pg_restore -l" with the directory archive to display the
        correct format name (Fujii Masao)
      * Properly record index comments created using UNIQUE and PRIMARY KEY
@@ -787,8 +1124,10 @@ Changes
        switchover (Fujii Masao)
        Previously, the streaming replication connection might close before
        all WAL files had been replayed on the standby.
-     * Improve WAL segment timeline handling during recovery (Heikki
-       Linnakangas)
+     * Fix WAL segment timeline handling during recovery (Mitsumasa Kondo,
+       Heikki Linnakangas)
+       WAL file recycling during standby recovery could lead to premature
+       recovery completion, resulting in data loss.
      * Fix "REINDEX TABLE" and "REINDEX DATABASE" to properly revalidate
        constraints and mark invalidated indexes as valid (Noah Misch)
        "REINDEX INDEX" has always worked properly.
@@ -812,21 +1151,25 @@ Changes
      * Loosen restriction on keywords used in queries (Tom Lane)
        Specifically, lessen keyword restrictions for role names, language
        names, "EXPLAIN" and "COPY" options, and "SET" values. This allows
-       COPY ... (FORMAT BINARY) previously BINARY required single-quotes.
+       COPY ... (FORMAT BINARY) to work as expected; previously BINARY
+       needed to be quoted.
      * Print proper line number during "COPY" failure (Heikki Linnakangas)
      * Fix pgp_pub_decrypt() so it works for secret keys with passwords
        (Marko Kreen)
-     * Have pg_upgrade use ">pg_dump --quote-all-identifiers" to avoid
+     * Make pg_upgrade use pg_dump --quote-all-identifiers to avoid
        problems with keyword changes between releases (Tom Lane)
      * Remove rare inaccurate warning during vacuum of index-less tables
        (Heikki Linnakangas)
-     * Improve analyze statistics generation after a cancelled file
-       truncate request (Kevin Grittner)
+     * Ensure that "VACUUM ANALYZE" still runs the ANALYZE phase if its
+       attempt to truncate the file is cancelled due to lock conflicts
+       (Kevin Grittner)
      * Avoid possible failure when performing transaction control commands
        (e.g "ROLLBACK") in prepared queries (Tom Lane)
-     * Allow various spellings of infinity on all platforms (Tom Lane)
-       Supported infinity values are "inf", "+inf", "-inf", "infinity",
-       "+infinity", and "-infinity".
+     * Ensure that floating-point data input accepts standard spellings of
+       "infinity" on all platforms (Tom Lane)
+       The C99 standard says that allowable spellings are inf, +inf, -inf,
+       infinity, +infinity, and -infinity. Make sure we recognize these
+       even if the platform's strtod function doesn't.
      * Avoid unnecessary reporting when track_activities is off (Tom Lane)
      * Expand ability to compare rows to records and arrays (Rafal
        Rzepecki, Tom Lane)
@@ -834,9 +1177,8 @@ Changes
        Momjian)
      * Add spinlock support for ARM64 (Mark Salter)
      * Update time zone data files to tzdata release 2013d for DST law
-       changes in DST law changes in Israel, Morocco, Palestine, Paraguay.
-       Also, historical zone data corrections for Macquarie Island (Tom
-       Lane)
+       changes in Israel, Morocco, Palestine, and Paraguay. Also,
+       historical zone data corrections for Macquarie Island.
      __________________________________________________________________
 
                                 Release 9.2.4
@@ -2439,6 +2781,112 @@ Documentation
        they mean, so applications should avoid using them.
      __________________________________________________________________
 
+                               Release 9.1.11
+
+     Release Date: 2013-12-05
+
+   This release contains a variety of fixes from 9.1.10. For information
+   about new features in the 9.1 major release, see the Section called
+   Release 9.1.
+     __________________________________________________________________
+
+Migration to Version 9.1.11
+
+   A dump/restore is not required for those running 9.1.X.
+
+   However, this release corrects a number of potential data corruption
+   issues. See the first two changelog entries below to find out whether
+   your installation has been affected and what steps you can take if so.
+
+   Also, if you are upgrading from a version earlier than 9.1.9, see the
+   release notes for 9.1.9.
+     __________________________________________________________________
+
+Changes
+
+     * Fix "VACUUM"'s tests to see whether it can update relfrozenxid
+       (Andres Freund)
+       In some cases "VACUUM" (either manual or autovacuum) could
+       incorrectly advance a table's relfrozenxid value, allowing tuples
+       to escape freezing, causing those rows to become invisible once
+       2^31 transactions have elapsed. The probability of data loss is
+       fairly low since multiple incorrect advancements would need to
+       happen before actual loss occurs, but it's not zero. Users
+       upgrading from releases 9.0.4 or 8.4.8 or earlier are not affected,
+       but all later versions contain the bug.
+       The issue can be ameliorated by, after upgrading, vacuuming all
+       tables in all databases while having vacuum_freeze_table_age set to
+       zero. This will fix any latent corruption but will not be able to
+       fix all pre-existing data errors. However, an installation can be
+       presumed safe after performing this vacuuming if it has executed
+       fewer than 2^31 update transactions in its lifetime (check this
+       with SELECT txid_current() < 2^31).
+     * Fix initialization of "pg_clog" and "pg_subtrans" during hot
+       standby startup (Andres Freund, Heikki Linnakangas)
+       This bug can cause data loss on standby servers at the moment they
+       start to accept hot-standby queries, by marking committed
+       transactions as uncommitted. The likelihood of such corruption is
+       small unless, at the time of standby startup, the primary server
+       has executed many updating transactions since its last checkpoint.
+       Symptoms include missing rows, rows that should have been deleted
+       being still visible, and obsolete versions of updated rows being
+       still visible alongside their newer versions.
+       This bug was introduced in versions 9.3.0, 9.2.5, 9.1.10, and
+       9.0.14. Standby servers that have only been running earlier
+       releases are not at risk. It's recommended that standby servers
+       that have ever run any of the buggy releases be re-cloned from the
+       primary (e.g., with a new base backup) after upgrading.
+     * Truncate "pg_multixact" contents during WAL replay (Andres Freund)
+       This avoids ever-increasing disk space consumption in standby
+       servers.
+     * Fix race condition in GIN index posting tree page deletion (Heikki
+       Linnakangas)
+       This could lead to transient wrong answers or query failures.
+     * Avoid flattening a subquery whose SELECT list contains a volatile
+       function wrapped inside a sub-SELECT (Tom Lane)
+       This avoids unexpected results due to extra evaluations of the
+       volatile function.
+     * Fix planner's processing of non-simple-variable subquery outputs
+       nested within outer joins (Tom Lane)
+       This error could lead to incorrect plans for queries involving
+       multiple levels of subqueries within JOIN syntax.
+     * Fix incorrect generation of optimized MIN()/MAX() plans for
+       inheritance trees (Tom Lane)
+       The planner could fail in cases where the MIN()/MAX() argument was
+       an expression rather than a simple variable.
+     * Fix premature deletion of temporary files (Andres Freund)
+     * Fix possible read past end of memory in rule printing (Peter
+       Eisentraut)
+     * Fix array slicing of int2vector and oidvector values (Tom Lane)
+       Expressions of this kind are now implicitly promoted to regular
+       int2 or oid arrays.
+     * Fix incorrect behaviors when using a SQL-standard, simple GMT
+       offset timezone (Tom Lane)
+       In some cases, the system would use the simple GMT offset value
+       when it should have used the regular timezone setting that had
+       prevailed before the simple offset was selected. This change also
+       causes the timeofday function to honor the simple GMT offset zone.
+     * Prevent possible misbehavior when logging translations of Windows
+       error codes (Tom Lane)
+     * Properly quote generated command lines in pg_ctl (Naoya Anzai and
+       Tom Lane)
+       This fix applies only to Windows.
+     * Fix pg_dumpall to work when a source database sets
+       default_transaction_read_only via "ALTER DATABASE SET" (Kevin
+       Grittner)
+       Previously, the generated script would fail during restore.
+     * Make ecpg search for quoted cursor names case-sensitively (Zoltan
+       Boszormenyi)
+     * Fix ecpg's processing of lists of variables declared varchar
+       (Zoltan Boszormenyi)
+     * Make "contrib/lo" defend against incorrect trigger definitions
+       (Marc Cousin)
+     * Update time zone data files to tzdata release 2013h for DST law
+       changes in Argentina, Brazil, Jordan, Libya, Liechtenstein,
+       Morocco, and Palestine. Also, new timezone abbreviations WIB, WIT,
+       WITA for Indonesia.
+     __________________________________________________________________
+
                                Release 9.1.10
 
      Release Date: 2013-10-10
@@ -2452,41 +2900,45 @@ Migration to Version 9.1.10
 
    A dump/restore is not required for those running 9.1.X.
 
-   Also, if you are upgrading from a version earlier than 9.1.6, see the
-   release notes for 9.1.6.
+   However, if you are upgrading from a version earlier than 9.1.9, see
+   the release notes for 9.1.9.
      __________________________________________________________________
 
 Changes
 
-     * Prevent downcasing of non-ASCII non-double-quoted identifiers in
-       multi-byte encodings (Andrew Dunstan)
-       The previous behavior was wrong and confusing.
+     * Prevent corruption of multi-byte characters when attempting to
+       case-fold identifiers (Andrew Dunstan)
+       PostgreSQL case-folds non-ASCII characters only when using a
+       single-byte server encoding.
      * Fix checkpoint memory leak in background writer when wal_level =
        hot_standby (Naoya Anzai)
      * Fix memory leak caused by lo_open() failure (Heikki Linnakangas)
      * Fix memory overcommit bug when work_mem is using more than 24GB of
        memory (Stephen Frost)
      * Serializable snapshot fixes (Kevin Grittner, Heikki Linnakangas)
-     * Fix libpq SSL deadlock bug (Stephen Frost)
-     * Fix possible SSL network stack corruption in threaded libpq
-       applications (Nick Phillips, Stephen Frost)
+     * Fix deadlock bug in libpq when using SSL (Stephen Frost)
+     * Fix possible SSL state corruption in threaded libpq applications
+       (Nick Phillips, Stephen Frost)
      * Properly compute row estimates for boolean columns containing many
        NULL values (Andrew Gierth)
        Previously tests like col IS NOT TRUE and col IS NOT FALSE did not
        properly factor in NULL values when estimating plan costs.
      * Prevent pushing down WHERE clauses into unsafe UNION/INTERSECT
        subqueries (Tom Lane)
-       Previously such push downs could generate errors.
-     * Fix rare GROUP BY query error caused by improperly processed date
-       type modifiers (Tom Lane)
+       Subqueries of a UNION or INTERSECT that contain set-returning
+       functions or volatile functions in their SELECT lists could be
+       improperly optimized, leading to run-time errors or incorrect query
+       results.
+     * Fix rare case of "failed to locate grouping columns" planner
+       failure (Tom Lane)
      * Fix pg_dump of foreign tables with dropped columns (Andrew Dunstan)
        Previously such cases could cause a pg_upgrade error.
      * Reorder pg_dump processing of extension-related rules and event
        triggers (Joe Conway)
      * Force dumping of extension tables if specified by "pg_dump -t" or
        -n (Joe Conway)
-     * Allow view dump code to better handle dropped columns on base
-       tables (Tom Lane)
+     * Improve view dumping code's handling of dropped columns in
+       referenced tables (Tom Lane)
      * Fix "pg_restore -l" with the directory archive to display the
        correct format name (Fujii Masao)
      * Properly record index comments created using UNIQUE and PRIMARY KEY
@@ -2496,8 +2948,10 @@ Changes
        switchover (Fujii Masao)
        Previously, the streaming replication connection might close before
        all WAL files had been replayed on the standby.
-     * Improve WAL segment timeline handling during recovery (Heikki
-       Linnakangas)
+     * Fix WAL segment timeline handling during recovery (Mitsumasa Kondo,
+       Heikki Linnakangas)
+       WAL file recycling during standby recovery could lead to premature
+       recovery completion, resulting in data loss.
      * Fix "REINDEX TABLE" and "REINDEX DATABASE" to properly revalidate
        constraints and mark invalidated indexes as valid (Noah Misch)
        "REINDEX INDEX" has always worked properly.
@@ -2518,26 +2972,29 @@ Changes
      * Loosen restriction on keywords used in queries (Tom Lane)
        Specifically, lessen keyword restrictions for role names, language
        names, "EXPLAIN" and "COPY" options, and "SET" values. This allows
-       COPY ... (FORMAT BINARY) previously BINARY required single-quotes.
+       COPY ... (FORMAT BINARY) to work as expected; previously BINARY
+       needed to be quoted.
      * Fix pgp_pub_decrypt() so it works for secret keys with passwords
        (Marko Kreen)
-     * Have pg_upgrade use ">pg_dump --quote-all-identifiers" to avoid
+     * Make pg_upgrade use pg_dump --quote-all-identifiers to avoid
        problems with keyword changes between releases (Tom Lane)
      * Remove rare inaccurate warning during vacuum of index-less tables
        (Heikki Linnakangas)
-     * Improve analyze statistics generation after a cancelled file
-       truncate request (Kevin Grittner)
+     * Ensure that "VACUUM ANALYZE" still runs the ANALYZE phase if its
+       attempt to truncate the file is cancelled due to lock conflicts
+       (Kevin Grittner)
      * Avoid possible failure when performing transaction control commands
        (e.g "ROLLBACK") in prepared queries (Tom Lane)
-     * Allow various spellings of infinity on all platforms (Tom Lane)
-       Supported infinity values are "inf", "+inf", "-inf", "infinity",
-       "+infinity", and "-infinity".
+     * Ensure that floating-point data input accepts standard spellings of
+       "infinity" on all platforms (Tom Lane)
+       The C99 standard says that allowable spellings are inf, +inf, -inf,
+       infinity, +infinity, and -infinity. Make sure we recognize these
+       even if the platform's strtod function doesn't.
      * Expand ability to compare rows to records and arrays (Rafal
        Rzepecki, Tom Lane)
      * Update time zone data files to tzdata release 2013d for DST law
-       changes in DST law changes in Israel, Morocco, Palestine, Paraguay.
-       Also, historical zone data corrections for Macquarie Island (Tom
-       Lane)
+       changes in Israel, Morocco, Palestine, and Paraguay. Also,
+       historical zone data corrections for Macquarie Island.
      __________________________________________________________________
 
                                 Release 9.1.9
@@ -4886,6 +5343,106 @@ Documentation
        assumptions about character set.
      __________________________________________________________________
 
+                               Release 9.0.15
+
+     Release Date: 2013-12-05
+
+   This release contains a variety of fixes from 9.0.14. For information
+   about new features in the 9.0 major release, see the Section called
+   Release 9.0.
+     __________________________________________________________________
+
+Migration to Version 9.0.15
+
+   A dump/restore is not required for those running 9.0.X.
+
+   However, this release corrects a number of potential data corruption
+   issues. See the first two changelog entries below to find out whether
+   your installation has been affected and what steps you can take if so.
+
+   Also, if you are upgrading from a version earlier than 9.0.13, see the
+   release notes for 9.0.13.
+     __________________________________________________________________
+
+Changes
+
+     * Fix "VACUUM"'s tests to see whether it can update relfrozenxid
+       (Andres Freund)
+       In some cases "VACUUM" (either manual or autovacuum) could
+       incorrectly advance a table's relfrozenxid value, allowing tuples
+       to escape freezing, causing those rows to become invisible once
+       2^31 transactions have elapsed. The probability of data loss is
+       fairly low since multiple incorrect advancements would need to
+       happen before actual loss occurs, but it's not zero. Users
+       upgrading from releases 9.0.4 or 8.4.8 or earlier are not affected,
+       but all later versions contain the bug.
+       The issue can be ameliorated by, after upgrading, vacuuming all
+       tables in all databases while having vacuum_freeze_table_age set to
+       zero. This will fix any latent corruption but will not be able to
+       fix all pre-existing data errors. However, an installation can be
+       presumed safe after performing this vacuuming if it has executed
+       fewer than 2^31 update transactions in its lifetime (check this
+       with SELECT txid_current() < 2^31).
+     * Fix initialization of "pg_clog" and "pg_subtrans" during hot
+       standby startup (Andres Freund, Heikki Linnakangas)
+       This bug can cause data loss on standby servers at the moment they
+       start to accept hot-standby queries, by marking committed
+       transactions as uncommitted. The likelihood of such corruption is
+       small unless, at the time of standby startup, the primary server
+       has executed many updating transactions since its last checkpoint.
+       Symptoms include missing rows, rows that should have been deleted
+       being still visible, and obsolete versions of updated rows being
+       still visible alongside their newer versions.
+       This bug was introduced in versions 9.3.0, 9.2.5, 9.1.10, and
+       9.0.14. Standby servers that have only been running earlier
+       releases are not at risk. It's recommended that standby servers
+       that have ever run any of the buggy releases be re-cloned from the
+       primary (e.g., with a new base backup) after upgrading.
+     * Truncate "pg_multixact" contents during WAL replay (Andres Freund)
+       This avoids ever-increasing disk space consumption in standby
+       servers.
+     * Fix race condition in GIN index posting tree page deletion (Heikki
+       Linnakangas)
+       This could lead to transient wrong answers or query failures.
+     * Avoid flattening a subquery whose SELECT list contains a volatile
+       function wrapped inside a sub-SELECT (Tom Lane)
+       This avoids unexpected results due to extra evaluations of the
+       volatile function.
+     * Fix planner's processing of non-simple-variable subquery outputs
+       nested within outer joins (Tom Lane)
+       This error could lead to incorrect plans for queries involving
+       multiple levels of subqueries within JOIN syntax.
+     * Fix premature deletion of temporary files (Andres Freund)
+     * Fix possible read past end of memory in rule printing (Peter
+       Eisentraut)
+     * Fix array slicing of int2vector and oidvector values (Tom Lane)
+       Expressions of this kind are now implicitly promoted to regular
+       int2 or oid arrays.
+     * Fix incorrect behaviors when using a SQL-standard, simple GMT
+       offset timezone (Tom Lane)
+       In some cases, the system would use the simple GMT offset value
+       when it should have used the regular timezone setting that had
+       prevailed before the simple offset was selected. This change also
+       causes the timeofday function to honor the simple GMT offset zone.
+     * Prevent possible misbehavior when logging translations of Windows
+       error codes (Tom Lane)
+     * Properly quote generated command lines in pg_ctl (Naoya Anzai and
+       Tom Lane)
+       This fix applies only to Windows.
+     * Fix pg_dumpall to work when a source database sets
+       default_transaction_read_only via "ALTER DATABASE SET" (Kevin
+       Grittner)
+       Previously, the generated script would fail during restore.
+     * Fix ecpg's processing of lists of variables declared varchar
+       (Zoltan Boszormenyi)
+     * Make "contrib/lo" defend against incorrect trigger definitions
+       (Marc Cousin)
+     * Update time zone data files to tzdata release 2013h for DST law
+       changes in Argentina, Brazil, Jordan, Libya, Liechtenstein,
+       Morocco, and Palestine. Also, new timezone abbreviations WIB, WIT,
+       WITA for Indonesia.
+     __________________________________________________________________
+
                                Release 9.0.14
 
      Release Date: 2013-10-10
@@ -4899,34 +5456,38 @@ Migration to Version 9.0.14
 
    A dump/restore is not required for those running 9.0.X.
 
-   Also, if you are upgrading from a version earlier than 9.0.6, see the
-   release notes for 9.0.6.
+   However, if you are upgrading from a version earlier than 9.0.13, see
+   the release notes for 9.0.13.
      __________________________________________________________________
 
 Changes
 
-     * Prevent downcasing of non-ASCII non-double-quoted identifiers in
-       multi-byte encodings (Andrew Dunstan)
-       The previous behavior was wrong and confusing.
+     * Prevent corruption of multi-byte characters when attempting to
+       case-fold identifiers (Andrew Dunstan)
+       PostgreSQL case-folds non-ASCII characters only when using a
+       single-byte server encoding.
      * Fix checkpoint memory leak in background writer when wal_level =
        hot_standby (Naoya Anzai)
      * Fix memory leak caused by lo_open() failure (Heikki Linnakangas)
      * Fix memory overcommit bug when work_mem is using more than 24GB of
        memory (Stephen Frost)
-     * Fix libpq SSL deadlock bug (Stephen Frost)
-     * Fix possible SSL network stack corruption in threaded libpq
-       applications (Nick Phillips, Stephen Frost)
+     * Fix deadlock bug in libpq when using SSL (Stephen Frost)
+     * Fix possible SSL state corruption in threaded libpq applications
+       (Nick Phillips, Stephen Frost)
      * Properly compute row estimates for boolean columns containing many
        NULL values (Andrew Gierth)
        Previously tests like col IS NOT TRUE and col IS NOT FALSE did not
        properly factor in NULL values when estimating plan costs.
      * Prevent pushing down WHERE clauses into unsafe UNION/INTERSECT
        subqueries (Tom Lane)
-       Previously such push downs could generate errors.
-     * Fix rare GROUP BY query error caused by improperly processed date
-       type modifiers (Tom Lane)
-     * Allow view dump code to better handle dropped columns on base
-       tables (Tom Lane)
+       Subqueries of a UNION or INTERSECT that contain set-returning
+       functions or volatile functions in their SELECT lists could be
+       improperly optimized, leading to run-time errors or incorrect query
+       results.
+     * Fix rare case of "failed to locate grouping columns" planner
+       failure (Tom Lane)
+     * Improve view dumping code's handling of dropped columns in
+       referenced tables (Tom Lane)
      * Properly record index comments created using UNIQUE and PRIMARY KEY
        syntax (Andres Freund)
        This fixes a parallel pg_restore failure.
@@ -4950,24 +5511,27 @@ Changes
      * Loosen restriction on keywords used in queries (Tom Lane)
        Specifically, lessen keyword restrictions for role names, language
        names, "EXPLAIN" and "COPY" options, and "SET" values. This allows
-       COPY ... (FORMAT BINARY) previously BINARY required single-quotes.
+       COPY ... (FORMAT BINARY) to work as expected; previously BINARY
+       needed to be quoted.
      * Fix pgp_pub_decrypt() so it works for secret keys with passwords
        (Marko Kreen)
      * Remove rare inaccurate warning during vacuum of index-less tables
        (Heikki Linnakangas)
-     * Improve analyze statistics generation after a cancelled file
-       truncate request (Kevin Grittner)
+     * Ensure that "VACUUM ANALYZE" still runs the ANALYZE phase if its
+       attempt to truncate the file is cancelled due to lock conflicts
+       (Kevin Grittner)
      * Avoid possible failure when performing transaction control commands
        (e.g ROLLBACK) in prepared queries (Tom Lane)
-     * Allow various spellings of infinity on all platforms (Tom Lane)
-       Supported infinity values are "inf", "+inf", "-inf", "infinity",
-       "+infinity", and "-infinity".
+     * Ensure that floating-point data input accepts standard spellings of
+       "infinity" on all platforms (Tom Lane)
+       The C99 standard says that allowable spellings are inf, +inf, -inf,
+       infinity, +infinity, and -infinity. Make sure we recognize these
+       even if the platform's strtod function doesn't.
      * Expand ability to compare rows to records and arrays (Rafal
        Rzepecki, Tom Lane)
      * Update time zone data files to tzdata release 2013d for DST law
-       changes in DST law changes in Israel, Morocco, Palestine, Paraguay.
-       Also, historical zone data corrections for Macquarie Island (Tom
-       Lane)
+       changes in Israel, Morocco, Palestine, and Paraguay. Also,
+       historical zone data corrections for Macquarie Island.
      __________________________________________________________________
 
                                Release 9.0.13
@@ -7816,6 +8380,88 @@ Contrib
        Lane)
      __________________________________________________________________
 
+                               Release 8.4.19
+
+     Release Date: 2013-12-05
+
+   This release contains a variety of fixes from 8.4.18. For information
+   about new features in the 8.4 major release, see the Section called
+   Release 8.4.
+     __________________________________________________________________
+
+Migration to Version 8.4.19
+
+   A dump/restore is not required for those running 8.4.X.
+
+   However, this release corrects a potential data corruption issue. See
+   the first changelog entry below to find out whether your installation
+   has been affected and what steps you can take if so.
+
+   Also, if you are upgrading from a version earlier than 8.4.17, see the
+   release notes for 8.4.17.
+     __________________________________________________________________
+
+Changes
+
+     * Fix "VACUUM"'s tests to see whether it can update relfrozenxid
+       (Andres Freund)
+       In some cases "VACUUM" (either manual or autovacuum) could
+       incorrectly advance a table's relfrozenxid value, allowing tuples
+       to escape freezing, causing those rows to become invisible once
+       2^31 transactions have elapsed. The probability of data loss is
+       fairly low since multiple incorrect advancements would need to
+       happen before actual loss occurs, but it's not zero. Users
+       upgrading from release 8.4.8 or earlier are not affected, but all
+       later versions contain the bug.
+       The issue can be ameliorated by, after upgrading, vacuuming all
+       tables in all databases while having vacuum_freeze_table_age set to
+       zero. This will fix any latent corruption but will not be able to
+       fix all pre-existing data errors. However, an installation can be
+       presumed safe after performing this vacuuming if it has executed
+       fewer than 2^31 update transactions in its lifetime (check this
+       with SELECT txid_current() < 2^31).
+     * Fix race condition in GIN index posting tree page deletion (Heikki
+       Linnakangas)
+       This could lead to transient wrong answers or query failures.
+     * Avoid flattening a subquery whose SELECT list contains a volatile
+       function wrapped inside a sub-SELECT (Tom Lane)
+       This avoids unexpected results due to extra evaluations of the
+       volatile function.
+     * Fix planner's processing of non-simple-variable subquery outputs
+       nested within outer joins (Tom Lane)
+       This error could lead to incorrect plans for queries involving
+       multiple levels of subqueries within JOIN syntax.
+     * Fix premature deletion of temporary files (Andres Freund)
+     * Fix possible read past end of memory in rule printing (Peter
+       Eisentraut)
+     * Fix array slicing of int2vector and oidvector values (Tom Lane)
+       Expressions of this kind are now implicitly promoted to regular
+       int2 or oid arrays.
+     * Fix incorrect behaviors when using a SQL-standard, simple GMT
+       offset timezone (Tom Lane)
+       In some cases, the system would use the simple GMT offset value
+       when it should have used the regular timezone setting that had
+       prevailed before the simple offset was selected. This change also
+       causes the timeofday function to honor the simple GMT offset zone.
+     * Prevent possible misbehavior when logging translations of Windows
+       error codes (Tom Lane)
+     * Properly quote generated command lines in pg_ctl (Naoya Anzai and
+       Tom Lane)
+       This fix applies only to Windows.
+     * Fix pg_dumpall to work when a source database sets
+       default_transaction_read_only via "ALTER DATABASE SET" (Kevin
+       Grittner)
+       Previously, the generated script would fail during restore.
+     * Fix ecpg's processing of lists of variables declared varchar
+       (Zoltan Boszormenyi)
+     * Make "contrib/lo" defend against incorrect trigger definitions
+       (Marc Cousin)
+     * Update time zone data files to tzdata release 2013h for DST law
+       changes in Argentina, Brazil, Jordan, Libya, Liechtenstein,
+       Morocco, and Palestine. Also, new timezone abbreviations WIB, WIT,
+       WITA for Indonesia.
+     __________________________________________________________________
+
                                Release 8.4.18
 
      Release Date: 2013-10-10
@@ -7829,30 +8475,34 @@ Migration to Version 8.4.18
 
    A dump/restore is not required for those running 8.4.X.
 
-   Also, if you are upgrading from a version earlier than 8.4.10, see the
-   release notes for 8.4.10.
+   However, if you are upgrading from a version earlier than 8.4.17, see
+   the release notes for 8.4.17.
      __________________________________________________________________
 
 Changes
 
-     * Prevent downcasing of non-ASCII non-double-quoted identifiers in
-       multi-byte encodings (Andrew Dunstan)
-       The previous behavior was wrong and confusing.
+     * Prevent corruption of multi-byte characters when attempting to
+       case-fold identifiers (Andrew Dunstan)
+       PostgreSQL case-folds non-ASCII characters only when using a
+       single-byte server encoding.
      * Fix memory leak caused by lo_open() failure (Heikki Linnakangas)
      * Fix memory overcommit bug when work_mem is using more than 24GB of
        memory (Stephen Frost)
-     * Fix libpq SSL deadlock bug (Stephen Frost)
+     * Fix deadlock bug in libpq when using SSL (Stephen Frost)
      * Properly compute row estimates for boolean columns containing many
        NULL values (Andrew Gierth)
        Previously tests like col IS NOT TRUE and col IS NOT FALSE did not
        properly factor in NULL values when estimating plan costs.
      * Prevent pushing down WHERE clauses into unsafe UNION/INTERSECT
        subqueries (Tom Lane)
-       Previously such push downs could generate errors.
-     * Fix rare GROUP BY query error caused by improperly processed date
-       type modifiers (Tom Lane)
-     * Allow view dump code to better handle dropped columns on base
-       tables (Tom Lane)
+       Subqueries of a UNION or INTERSECT that contain set-returning
+       functions or volatile functions in their SELECT lists could be
+       improperly optimized, leading to run-time errors or incorrect query
+       results.
+     * Fix rare case of "failed to locate grouping columns" planner
+       failure (Tom Lane)
+     * Improve view dumping code's handling of dropped columns in
+       referenced tables (Tom Lane)
      * Fix possible deadlock during concurrent "CREATE INDEX CONCURRENTLY"
        operations (Tom Lane)
      * Fix regexp_matches() handling of zero-length matches (Jeevan
@@ -7871,15 +8521,16 @@ Changes
        (Heikki Linnakangas)
      * Avoid possible failure when performing transaction control commands
        (e.g "ROLLBACK") in prepared queries (Tom Lane)
-     * Allow various spellings of infinity on all platforms (Tom Lane)
-       Supported infinity values are "inf", "+inf", "-inf", "infinity",
-       "+infinity", and "-infinity".
+     * Ensure that floating-point data input accepts standard spellings of
+       "infinity" on all platforms (Tom Lane)
+       The C99 standard says that allowable spellings are inf, +inf, -inf,
+       infinity, +infinity, and -infinity. Make sure we recognize these
+       even if the platform's strtod function doesn't.
      * Expand ability to compare rows to records and arrays (Rafal
        Rzepecki, Tom Lane)
      * Update time zone data files to tzdata release 2013d for DST law
-       changes in DST law changes in Israel, Morocco, Palestine, Paraguay.
-       Also, historical zone data corrections for Macquarie Island (Tom
-       Lane)
+       changes in Israel, Morocco, Palestine, and Paraguay. Also,
+       historical zone data corrections for Macquarie Island.
      __________________________________________________________________
 
                                Release 8.4.17
